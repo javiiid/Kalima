@@ -1,0 +1,101 @@
+# ============================================================
+# KALIMA — packaging configuration
+# ============================================================
+#
+# One file that replaces setup.py / setup.cfg / requirements.txt
+# for packaging purposes. requirements.txt stays as the quick
+# local-install shortcut; the pins here mirror it exactly.
+#
+# Build & use:
+#   pip install build && python -m build        # sdist + wheel
+#   pip install dist/kalima-*.whl               # install the package
+#   pip install -e .                            # editable/dev install
+#
+# First run after any install still needs the Playwright browsers:
+#   playwright install chromium
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+# SPDX license string + license-files need setuptools >= 77
+# (PEP 639; released 2025, fine for a 2026 launch timeline).
+
+[project]
+name = "kalima"
+version = "0.1.0"
+description = "Translate EPUB and PDF books with any OpenAI-compatible API — chunked, resumable, with a human-approved glossary."
+readme = "readme.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["translation", "epub", "pdf", "openai", "books"]
+authors = [{ name = "KALIMA" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: Persian",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+# Mirror of requirements.txt. Keep both in sync until requirements.txt
+# is retired; requirements.txt remains the fast path for the documented
+# local setup (readme.md), so it must not drift or diverge in pins.
+dependencies = [
+    "openai",
+    "PyYAML",
+    "PyMuPDF",
+    "pypandoc_binary==1.17",
+    "fonttools[woff]==4.66.0",
+    "playwright==1.62.0",
+    # Apple OAuth only: ES256 client_secret signing + JWK (RS256) verification.
+    # Nothing else in the app may import it; Google OAuth stays stdlib-only.
+    "cryptography==50.0.2",
+]
+
+# Tests are packaged source material (they ship in the sdist, not the
+# wheel) and pytest discovery still uses pytest.ini at the repo root.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "build",
+]
+
+# CLI + server entry points, equivalent to `python -m app.main` /
+# `python -m app.web`.
+[project.scripts]
+kalima = "app.main:main"
+kalima-web = "app.web:main"
+
+# ============================================================
+# Build configuration
+# ============================================================
+
+# CAVEAT (launch migration): app/core/paths.py resolves runtime dirs
+# (data/, temp/, /output/) as parents of the app package, which is only
+# correct for a repo checkout or an editable install (`pip install -e .`),
+# where ensure_dir(...) still lands in the project root. In a regular
+# wheel install they would be created inside site-packages. This is the
+# existing local-only behavior documented in LAUNCH.md — per-user storage
+# moves these paths under app/core/paths.py — so wheel installs should
+# wait for that Phase A change, or the server should be launched from a
+# repo checkout / editable install.
+
+
+[tool.setuptools.packages.find]
+# Ship only the application package; tests, scripts and frontend/ui
+# stay out of the wheel.
+include = ["app*"]
+
+# Runtime assets referenced with Path(__file__) inside the package:
+# app/presets/styles.json, app/output/fonts/*.ttf, app/library/*.woff2,
+# app/brand/*.svg. Paths are resolved from the installed package, so
+# these must be present in the wheel.
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.ttf", "*.woff2", "*.svg", "*.md"]

@@ -158,6 +158,10 @@ export interface LibraryVariant {
   error: string | null
   download: string
   reader: string
+  /** Model that produced this translated variant; `''` for original files. */
+  model: string
+  /** Provider cost so far for this variant's job, rounded server-side. */
+  cost: number
 }
 
 export interface LibraryBook {
@@ -180,6 +184,10 @@ export interface LibraryBook {
   size_bytes: number
   translated: boolean
   readable: boolean
+  /** Model of the first translated variant; `''` when nothing was translated. */
+  model: string
+  /** Sum of every variant's cost, so a single number can be sorted and shown. */
+  cost: number
 }
 
 export interface LibraryListResponse {
@@ -188,6 +196,30 @@ export interface LibraryListResponse {
   page: number
   limit: number
   storage: { used: number; free: number }
+  /** Distinct translation models across the user's jobs, for the filter menu. */
+  models: string[]
+}
+
+/** Ordering `/api/library` understands; anything else falls back to updated. */
+export type LibrarySort = 'updated' | 'created' | 'title' | 'size' | 'cost' | 'progress'
+
+/**
+ * Where the search box looks: `title` matches the book title, `content`
+ * additionally matches the translated text stored in the chunk table.
+ */
+export type LibraryScope = 'title' | 'content'
+
+/** Group operations the bulk endpoint accepts. */
+export type LibraryBulkAction = 'delete' | 'resume' | 'download'
+
+export interface LibraryBulkResult {
+  ok: boolean
+  action: LibraryBulkAction
+  requested: number
+  deleted?: number
+  resumed?: number
+  /** Books a bulk action could not touch, with the server's reason. */
+  skipped?: Array<{ id: number; reason: string }>
 }
 
 /**
@@ -671,6 +703,47 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+/** The inputs `/api/library` can be filtered and ordered by. */
+export interface LibraryQueryInput {
+  page: number
+  limit: number
+  query?: string
+  status?: LibraryStatusFilter | ''
+  shelf?: LibraryShelf | ''
+  tag?: string
+  scope?: LibraryScope | ''
+  model?: string
+  since?: string
+  until?: string
+  sort?: LibrarySort | ''
+}
+
+/**
+ * Build the `/api/library` URL, dropping every filter that is "off".
+ *
+ * Kept separate from `api.library` so the decisions -- which empty values mean
+ * "no filter", that a date is passed through untouched, that `0` is a real page
+ * -- are testable without a `fetch`. The endpoint treats a missing parameter
+ * and an empty one the same, but sending neither keeps the URL (and any server
+ * log of it) honest about what was actually asked.
+ */
+export function libraryQuery(input: LibraryQueryInput): string {
+  const params = new URLSearchParams({ page: String(input.page), limit: String(input.limit) })
+  const query = (input.query ?? '').trim()
+  if (query) params.set('q', query)
+  if (input.status) params.set('status', input.status)
+  if (input.shelf) params.set('shelf', input.shelf)
+  const tag = (input.tag ?? '').trim()
+  if (tag) params.set('tag', tag)
+  if (input.scope) params.set('scope', input.scope)
+  const model = (input.model ?? '').trim()
+  if (model) params.set('model', model)
+  if (input.since) params.set('since', input.since)
+  if (input.until) params.set('until', input.until)
+  if (input.sort) params.set('sort', input.sort)
+  return `/api/library?${params}`
+}
+
 export const api = {
   health: () => request<HealthPayload>('/api/health'),
   healthVerify: () => request<HealthPayload>('/api/health?verify=1'),
@@ -719,24 +792,50 @@ export const api = {
   providerConfig: () => request<ProviderConfig>('/api/provider-config'),
 
   /* --- library ------------------------------------------------------ */
-  library: (
-    page: number,
-    limit: number,
-    query = '',
+  library: (page: number, limit: number, query = '', status: LibraryStatusFilter | '' = '',
     // `''` is "no filter", which is what the endpoint already understands by
     // omission -- so it is a value here rather than an optional parameter, and a
     // caller cannot pass `undefined` where the union would not take it.
-    status: LibraryStatusFilter | '' = '',
-    // Same convention for the reading shelf and tag: omission means no filter.
-    shelf: LibraryShelf | '' = '',
-    tag = '',
-  ) => {
-    const params = new URLSearchParams({ page: String(page), limit: String(limit) })
-    if (query.trim()) params.set('q', query.trim())
-    if (status) params.set('status', status)
-    if (shelf) params.set('shelf', shelf)
-    if (tag.trim()) params.set('tag', tag.trim())
-    return request<LibraryListResponse>(`/api/library?${params}`)
+    shelf: LibraryShelf | '' = '', tag = '',
+    // New filters append at the end so existing positional callers are
+    // unaffected. `''` everywhere still means "the server applies no filter".
+    scope: LibraryScope | '' = '', model = '', since = '', until = '',
+    sort: LibrarySort | '' = '',
+  ) => request<LibraryListResponse>(
+    libraryQuery({ page, limit, query, status, shelf, tag, scope, model, since, until, sort }),
+  ),
+  /**
+   * Delete / resume / download a selection of books in one call.
+   *
+   * The endpoint caps the list at 100 server-side; the UI caps its selection
+   * the same way so the two never disagree about what was asked for.
+   */
+  libraryBulk: (action: LibraryBulkAction, ids: number[]) =>
+    request<LibraryBulkResult>('/api/library/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ids }),
+    }),
+  /**
+   * Batch download a selection as one zip.
+   *
+   * This bypasses `request()` on purpose: that helper parses JSON, and the
+   * response is a binary attachment. The zip is built fully server-side, so the
+   * whole blob is available at once and an object URL can stream it to disk.
+   */
+  libraryDownload: async (ids: number[]): Promise<{ blob: Blob; filename: string }> => {
+    const response = await fetch('/api/library/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'download', ids }),
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      throw new ApiError(errorMessage(readJsonBody(text, response.status), response.status), response.status)
+    }
+    const disposition = response.headers.get('content-disposition') || ''
+    const match = /filename="?([^";]+)"?/.exec(disposition)
+    return { blob: await response.blob(), filename: match?.[1] ?? 'kalima-library.zip' }
   },
   book: (id: number) => request<LibraryBook>(`/api/library/${id}`),
   /**

@@ -37,7 +37,14 @@
  * count. They read a single wide page and say so below.
  */
 
-import type { LibraryBook, LibraryShelf, LibraryStatusFilter, LibraryVariant } from './api'
+import type {
+  LibraryBook,
+  LibraryScope,
+  LibraryShelf,
+  LibrarySort,
+  LibraryStatusFilter,
+  LibraryVariant,
+} from './api'
 
 /**
  * The variant a row reports on.
@@ -383,4 +390,105 @@ export function pagesOnDay(
 ): number {
   if (!stats) return 0
   return stats.per_day.find((row) => row.day === today)?.pages ?? 0
+}
+
+/* ------------------------------------------------------------------ */
+/* Filters and sorting                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The ordering keys `/api/library` accepts, in the order the menu shows them.
+ *
+ * These are the endpoint's own strings (`library_summary`), not a set invented
+ * here: a sort menu that offered something the server ignores would look like a
+ * control and behave like a decoration. `updated` is the endpoint's default and
+ * is first because it is the one most readers want.
+ */
+export const LIBRARY_SORTS: readonly LibrarySort[] = [
+  'updated',
+  'created',
+  'title',
+  'size',
+  'cost',
+  'progress',
+]
+
+/**
+ * Where the search box looks.
+ *
+ * `title` is the endpoint's historic behaviour; `content` additionally matches
+ * the translated text stored in the chunk table. `scope` only changes an answer
+ * when there is a query, so the control is inert -- not wrong -- until one is
+ * typed.
+ */
+export const LIBRARY_SCOPES: readonly LibraryScope[] = ['title', 'content']
+
+/* ------------------------------------------------------------------ */
+/* Group operations                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The most books one bulk request may name.
+ *
+ * The endpoint clamps its own list at 100; holding the client to the same
+ * number means "select all" and a hand-built request can never disagree about
+ * what was asked for. A hundred is also a page at the endpoint's ceiling, so a
+ * selection never has to reach across pages to be complete.
+ */
+export const SELECTION_MAX = 100
+
+/**
+ * Flip one book in a selection, returning a new set.
+ *
+ * A fresh `Set` every time, because React compares references: mutating the set
+ * in place would render with the same value and show nothing changed. A click
+ * that would grow the set past `max` is a no-op rather than a silent eviction --
+ * dropping an already-chosen book to admit a new one is the kind of swap a
+ * reader only discovers after the download finishes short.
+ */
+export function toggleSelected(
+  selected: ReadonlySet<number>,
+  id: number,
+  max: number = SELECTION_MAX,
+): Set<number> {
+  const next = new Set(selected)
+  if (next.has(id)) {
+    next.delete(id)
+    return next
+  }
+  if (next.size >= max) return new Set(selected)
+  next.add(id)
+  return next
+}
+
+/** The selection the header "select all" produces: the first `max` ids. */
+export function selectAll(ids: readonly number[], max: number = SELECTION_MAX): Set<number> {
+  return new Set(ids.slice(0, Math.max(0, max)))
+}
+
+/** Whether every id on the page is selected (and there is at least one). */
+export function allSelected(ids: readonly number[], selected: ReadonlySet<number>): boolean {
+  return ids.length > 0 && ids.every((id) => selected.has(id))
+}
+
+/** How many books a bulk action will touch. */
+export function selectedCount(selected: ReadonlySet<number>): number {
+  return selected.size
+}
+
+/**
+ * Whether a book looks resumable to the client.
+ *
+ * Best-effort by design: the server also needs a *live in-memory job* to
+ * rebuild the pipeline from (`_resumable_job_for_book`), which the library
+ * payload does not carry, so a book that passes here can still come back in the
+ * skipped list after a server restart. Matching the server's visible rule --
+ * a paused or failed EPUB variant -- keeps that list short without letting the
+ * button promise more than the server can deliver.
+ */
+export function isResumable(book: LibraryBook): boolean {
+  return (book.variants ?? []).some(
+    (variant) =>
+      variant.extension === 'epub' && (variant.status === 'paused' || variant.status === 'failed'),
+  )
 }

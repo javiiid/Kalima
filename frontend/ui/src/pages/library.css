@@ -505,3 +505,108 @@
   line-height: var(--text-caption--line-height);
   color: var(--color-text-muted);
 }
+
+/* --------------------------------------------------------------------------
+   Filters
+
+   A second control row under the search row, wrapping like `control-row` so a
+   phone breaks it instead of pushing a date picker off the edge. Each control
+   is wrapped in a `<label>`, which is both its accessible name and what keeps
+   it from being a direct child of the row's `<div>` -- the responsive test
+   finds "the search field's row" as the first `<div>` holding an `<input>`,
+   and a bare date input here would be mistaken for it.
+   -------------------------------------------------------------------------- */
+.lib-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2) var(--spacing-3);
+}
+
+.lib-filter {
+  display: grid;
+  gap: var(--spacing-1);
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.lib-filter-label {
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.lib-filter > .field {
+  width: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   Selection and the group-operation bar
+
+   The bar only appears once something is selected, so it never takes a row of
+   the list's chrome while the reader is just browsing. The checkbox column is
+   `flex: none` for the same reason the cover is: a long filename must not
+   squeeze a fixed-size control.
+   -------------------------------------------------------------------------- */
+.lib-listbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2) var(--spacing-3);
+}
+
+.lib-select {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  flex: none;
+  gap: var(--spacing-2);
+  min-height: 24px;
+  cursor: pointer;
+}
+
+.lib-select input[type='checkbox'] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.lib-select-all {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.lib-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.lib-bulk-count {
+  font-size: var(--text-label);
+  font-weight: 700;
+  color: var(--color-text-brand);
+}
+
+.lib-bulk-hint {
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.lib-bulk-note {
+  flex-basis: 100%;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-secondary);
+}
+
+/* A selected row reads as one block. `:has` is progressive enhancement -- an
+   engine without it loses the tint, never the checkbox, which is the state
+   that matters. */
+.surface-card:has(> .lib-row[data-selected='true']) {
+  border-color: var(--color-selected-border);
+  background: var(--color-selected);
+}

@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ApiError, readJsonBody, uploadIdFrom, withUploadId } from '../src/lib/api.ts'
+import { ApiError, libraryQuery, readJsonBody, uploadIdFrom, withUploadId } from '../src/lib/api.ts'
 
 describe('readJsonBody', () => {
   it('parses a JSON object', () => {
@@ -84,5 +84,49 @@ describe('the upload id the calibration route needs', () => {
     // slash would be a 422 on the very next call.
     const id = uploadIdFrom('/srv/uploads/ab12_book.epub')
     assert.ok(!id.includes('/') && !id.includes('\\'))
+  })
+})
+
+describe('the library query URL', () => {
+  /* The filters the page adds -- model, scope, dates, sort -- all have to reach
+     the endpoint as parameters, because every one of them narrows or reorders
+     the server's answer rather than one page of it. The rule this pins is which
+     empty values mean "no filter": omit, do not send an empty parameter. */
+  it('sends only the page and limit when nothing is filtered', () => {
+    assert.equal(libraryQuery({ page: 1, limit: 12 }), '/api/library?page=1&limit=12')
+  })
+
+  it('trims a query and drops an empty one', () => {
+    assert.equal(
+      libraryQuery({ page: 2, limit: 12, query: '  ', tag: '' }),
+      '/api/library?page=2&limit=12',
+    )
+    const withQuery = libraryQuery({ page: 1, limit: 12, query: '  شب  ' })
+    assert.ok(withQuery.includes('q=%D8%B4%D8%A8'))
+  })
+
+  it('carries status, shelf and tag only when set', () => {
+    const url = libraryQuery({ page: 1, limit: 12, status: 'completed', shelf: 'reading', tag: 'رمان' })
+    assert.ok(url.includes('status=completed'))
+    assert.ok(url.includes('shelf=reading'))
+    assert.ok(url.includes(`tag=${encodeURIComponent('رمان')}`))
+    assert.ok(!libraryQuery({ page: 1, limit: 12, status: '', shelf: '' }).includes('status='))
+  })
+
+  it('passes model, scope, dates and sort through untouched', () => {
+    const url = libraryQuery({
+      page: 3,
+      limit: 24,
+      model: 'gpt-6.1-sol',
+      scope: 'content',
+      since: '2026-01-01',
+      until: '2026-06-30',
+      sort: 'cost',
+    })
+    assert.ok(url.includes('model=gpt-6.1-sol'))
+    assert.ok(url.includes('scope=content'))
+    assert.ok(url.includes('since=2026-01-01'))
+    assert.ok(url.includes('until=2026-06-30'))
+    assert.ok(url.includes('sort=cost'))
   })
 })

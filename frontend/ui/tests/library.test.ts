@@ -35,12 +35,17 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   LIBRARY_TABS,
+  LIBRARY_SCOPES,
+  LIBRARY_SORTS,
+  SELECTION_MAX,
   activeVariant,
+  allSelected,
   bookShelf,
   bookTags,
   chunkProgress,
   coverInitials,
   furthestProgress,
+  isResumable,
   isShelf,
   lastReadable,
   libraryStats,
@@ -51,6 +56,9 @@ import {
   progressLadder,
   readableVariant,
   recentActivity,
+  selectAll,
+  selectedCount,
+  toggleSelected,
 } from '../src/lib/library.ts'
 import type { LibraryBook, LibraryVariant } from '../src/lib/api.ts'
 
@@ -79,6 +87,8 @@ function variant(over: Partial<LibraryVariant> = {}): LibraryVariant {
     error: null,
     download: '/downloads/job-1',
     reader: '/reader/job-1',
+    model: 'gpt-5.6-luna',
+    cost: 0,
     ...over,
   }
 }
@@ -96,6 +106,8 @@ function book(over: Partial<LibraryBook> = {}): LibraryBook {
     size_bytes: 4096,
     translated: true,
     readable: true,
+    model: 'gpt-5.6-luna',
+    cost: 0,
     ...over,
   }
 }
@@ -479,5 +491,73 @@ describe('pages on a day', () => {
     assert.equal(pagesOnDay(stats, '2026-10-12'), 0)
     assert.equal(pagesOnDay(null, '2026-10-10'), 0)
     assert.equal(pagesOnDay({ per_day: [] }, '2026-10-10'), 0)
+  })
+})
+
+describe('the sort and scope menus', () => {
+  it('offers exactly the orderings the endpoint understands', () => {
+    // A menu option the server ignores would look like a control and behave
+    // like a decoration; this is the endpoint's own set.
+    assert.deepEqual([...LIBRARY_SORTS], ['updated', 'created', 'title', 'size', 'cost', 'progress'])
+  })
+
+  it('offers exactly the two search scopes, title first', () => {
+    assert.deepEqual([...LIBRARY_SCOPES], ['title', 'content'])
+  })
+})
+
+describe('choosing books for a group action', () => {
+  it('adds an id and returns a new set, so React sees a change', () => {
+    const before = new Set<number>()
+    const after = toggleSelected(before, 7)
+    assert.deepEqual([...after], [7])
+    assert.deepEqual([...before], [], 'the original set must not be mutated')
+  })
+
+  it('removes an id that is already chosen', () => {
+    assert.deepEqual([...toggleSelected(new Set([7, 8]), 7)], [8])
+  })
+
+  it('refuses to grow past the cap rather than evicting a chosen book', () => {
+    // A silent eviction is invisible until the download comes back one book
+    // short, so the click is a no-op instead.
+    const full = selectAll([1, 2, 3], 3)
+    assert.deepEqual([...toggleSelected(full, 4, 3)], [1, 2, 3])
+  })
+
+  it('caps the selection at the server limit by default', () => {
+    const ids = Array.from({ length: SELECTION_MAX + 25 }, (_, index) => index + 1)
+    assert.equal(selectAll(ids).size, SELECTION_MAX)
+    assert.equal(SELECTION_MAX, 100)
+  })
+
+  it('knows whether the whole page is selected, and never for an empty page', () => {
+    assert.equal(allSelected([1, 2], new Set([1, 2])), true)
+    assert.equal(allSelected([1, 2], new Set([1])), false)
+    assert.equal(allSelected([], new Set()), false)
+  })
+
+  it('counts what a bulk action will touch', () => {
+    assert.equal(selectedCount(new Set([1, 2, 3])), 3)
+    assert.equal(selectedCount(new Set()), 0)
+  })
+})
+
+describe('what can be resumed from the library', () => {
+  it('is true for a paused EPUB translation', () => {
+    const subject = book({
+      variants: [variant({ status: 'paused', extension: 'epub' })],
+    })
+    assert.equal(isResumable(subject), true)
+  })
+
+  it('is true for a failed EPUB translation', () => {
+    assert.equal(isResumable(book({ variants: [variant({ status: 'failed', extension: 'epub' })] })), true)
+  })
+
+  it('is false once the book completed, or has no EPUB variant', () => {
+    assert.equal(isResumable(book({ variants: [variant({ status: 'completed' })] })), false)
+    assert.equal(isResumable(book({ variants: [variant({ status: 'paused', extension: 'pdf' })] })), false)
+    assert.equal(isResumable(book({ variants: [] })), false)
   })
 })

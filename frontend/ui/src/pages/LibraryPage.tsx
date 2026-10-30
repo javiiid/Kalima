@@ -1,19 +1,30 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
-import type { LibraryBook, LibraryShelf, LibraryStatusFilter } from '@/lib/api'
+import type {
+  LibraryBook,
+  LibraryScope,
+  LibraryShelf,
+  LibrarySort,
+  LibraryStatusFilter,
+} from '@/lib/api'
 import { fa, faAgo, faBytes, faDate, badgeClass, statusLabel } from '@/lib/format'
 import { useLanguage } from '@/i18n/useLanguage.ts'
 import type { StringKey } from '@/i18n/fa.ts'
 import {
   LIBRARY_TABS,
+  LIBRARY_SCOPES,
+  LIBRARY_SORTS,
+  SELECTION_MAX,
   activeVariant,
+  allSelected,
   bookShelf,
   bookTags,
   chunkProgress,
   coverInitials,
   furthestProgress,
+  isResumable,
   lastReadable,
   libraryStats,
   pageCount,
@@ -22,6 +33,9 @@ import {
   progressLadder,
   readableVariant,
   recentActivity,
+  selectAll,
+  selectedCount,
+  toggleSelected,
 } from '@/lib/library'
 import { NavIcon } from '@/components/NavIcon'
 import './library.css'
@@ -67,13 +81,16 @@ import './library.css'
  * extracts real covers where it can (`app/library/covers.py`), and the tile
  * below becomes an `<img>` whenever `cover_path` is set.
  *
- * There is no sorting control either, though the design had one. The endpoint
- * takes `q`, `status` and `type` and returns `updated_at DESC`; a sort menu
- * would be four options of which only one does anything. Until the endpoint
- * sorts, the honest list is "most recently touched first".
+ * Sorting, the model / date / scope filters and text-inside-the-translation
+ * search are all server-side (`library_summary`). A client-side sort over one
+ * page would be wrong the moment a library has a second page, so the menu,
+ * the date range and the scope toggle each become a query parameter and a page
+ * reset rather than an in-memory reorder.
  *
- * And "unfinished" is the one filter this page widens locally rather than asking
- * the server for -- see `matchesFilter` for why, and for what it costs.
+ * The group operations -- delete, batch download and multi-resume -- go through
+ * one `POST /api/library/bulk`, capped at `SELECTION_MAX` books so a selection
+ * is always a page the endpoint can also filter. Each action reports what the
+ * server skipped rather than assuming the whole selection succeeded.
  */
 
 const PAGE_SIZE = 12
@@ -136,6 +153,26 @@ const SHELF_KEY: Record<string, StringKey> = {
 const shelfLabel = (t: (key: StringKey) => string, shelf: string): string => {
   const key = SHELF_KEY[shelf]
   return key ? t(key) : shelf
+}
+
+/**
+ * A sort key, as a dictionary key. Same shape as `KIND_KEY`: the union and the
+ * label table are written once so a new sort the endpoint grows cannot appear
+ * in the menu as raw Latin.
+ */
+const SORT_KEY: Record<LibrarySort, StringKey> = {
+  updated: 'library.sort.updated',
+  created: 'library.sort.created',
+  title: 'library.sort.title',
+  size: 'library.sort.size',
+  cost: 'library.sort.cost',
+  progress: 'library.sort.progress',
+}
+
+/** A search scope, as a dictionary key. */
+const SCOPE_KEY: Record<LibraryScope, StringKey> = {
+  title: 'library.filter.scope.title',
+  content: 'library.filter.scope.content',
 }
 
 /** A file format, as the badge on the cover and in the row's meta line. */
@@ -316,8 +353,26 @@ function BookMenu({ book }: { book: LibraryBook }) {
   )
 }
 
-/** One book in the list. */
-function BookRow({ book }: { book: LibraryBook }) {
+/**
+ * One book in the list.
+ *
+ * The checkbox lives inside the first cell rather than as a column of its own:
+ * the row is a grid the responsive test pins to `minmax(0,1fr)` first, and a
+ * leading `auto` column would put the 48px cover further from the gutter than
+ * every other page's content. Its `aria-label` names the book so a screen
+ * reader does not announce twelve identical "select" boxes.
+ */
+function BookRow({
+  book,
+  selected,
+  onToggle,
+  disabled,
+}: {
+  book: LibraryBook
+  selected: boolean
+  onToggle: (id: number) => void
+  disabled: boolean
+}) {
   const { t } = useLanguage()
   const active = activeVariant(book)
   const chunks = chunkProgress(active)
@@ -340,8 +395,20 @@ function BookRow({ book }: { book: LibraryBook }) {
           The cover is inside the first cell rather than beside it, because a
           third column for a 48px tile would take its width from the title on
           every screen down to the narrowest one. */}
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-start lg:gap-4">
+      <div
+        className="grid lib-row gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-start lg:gap-4"
+        data-selected={selected || undefined}
+      >
         <div className="flex min-w-0 gap-[var(--spacing-3)]">
+          <label className="lib-select">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggle(book.id)}
+              disabled={disabled}
+              aria-label={t('library.selectBook', { title: book.title })}
+            />
+          </label>
           <BookCover book={book} />
           <div className="min-w-0">
             <strong className="lib-title">{book.title}</strong>
@@ -475,6 +542,7 @@ function Spotlight({
 
 export function LibraryPage() {
   const { t, dir } = useLanguage()
+  const client = useQueryClient()
   const [page, setPage] = useState(1)
   const [filter, setFilter] = useState<LibraryStatusFilter | ''>('')
   const [rawQuery, setRawQuery] = useState('')
@@ -485,6 +553,18 @@ export function LibraryPage() {
   const [shelfFilter, setShelfFilter] = useState<LibraryShelf | ''>('')
   const [rawTag, setRawTag] = useState('')
   const [tag, setTag] = useState('')
+  // Server-side narrowing: model, a date range, and where the search box looks.
+  // Each is a query parameter rather than a client-side pass over one page, so
+  // the count, the pager and the list all agree about the same filter.
+  const [modelFilter, setModelFilter] = useState('')
+  const [since, setSince] = useState('')
+  const [until, setUntil] = useState('')
+  const [scope, setScope] = useState<LibraryScope>('title')
+  const [sort, setSort] = useState<LibrarySort>('updated')
+  // The group-operation selection, plus the line that reports what a bulk
+  // action actually did (including what the server skipped).
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [bulkNotice, setBulkNotice] = useState('')
 
   // Debounce: 300ms is short enough to feel live and long enough that a fast
   // typist does not produce eight requests.
@@ -539,8 +619,22 @@ export function LibraryPage() {
     staleTime: 30_000,
   })
   const books = useQuery({
-    queryKey: ['library', 'list', page, query, filter, shelfFilter, tag],
-    queryFn: () => api.library(page, PAGE_SIZE, query, filter, shelfFilter, tag),
+    queryKey: [
+      'library',
+      'list',
+      page,
+      query,
+      filter,
+      shelfFilter,
+      tag,
+      scope,
+      modelFilter,
+      since,
+      until,
+      sort,
+    ],
+    queryFn: () =>
+      api.library(page, PAGE_SIZE, query, filter, shelfFilter, tag, scope, modelFilter, since, until, sort),
     placeholderData: (previous) => previous,
   })
   // Pages per day and the reading streak. Polled on a slower cadence than the
@@ -563,6 +657,9 @@ export function LibraryPage() {
   const pages = pageCount(total, books.data?.limit ?? PAGE_SIZE)
   const range = pageRange(page, books.data?.limit ?? PAGE_SIZE, total)
   const activity = recentActivity(spotlight.data?.items ?? [])
+  // Models come from the unfiltered counts query, so the menu offers every model
+  // in the library rather than only the ones the current filter happens to show.
+  const models = counts.data?.models ?? []
 
   const chooseFilter = (key: LibraryStatusFilter | '') => {
     setFilter(key)
@@ -572,6 +669,88 @@ export function LibraryPage() {
   const chooseShelf = (key: LibraryShelf | '') => {
     setShelfFilter(key)
     setPage(1)
+  }
+
+  // One endpoint, three verbs. Each invalidates the whole `library` prefix on
+  // success -- a group delete moves the counts, the spotlights and the list at
+  // once, and a per-query key would leave a figure that no longer adds up.
+  const bulkDelete = useMutation({
+    mutationFn: () => api.libraryBulk('delete', [...selected]),
+    onSuccess: (result) => {
+      setBulkNotice(t('library.bulk.deleted', { count: fa(result.deleted ?? 0) }))
+      setSelected(new Set())
+      void client.invalidateQueries({ queryKey: ['library'] })
+    },
+    onError: () => setBulkNotice(t('library.bulk.error')),
+  })
+  const bulkResume = useMutation({
+    mutationFn: () => api.libraryBulk('resume', [...selected]),
+    onSuccess: (result) => {
+      const resumed = t('library.bulk.resumed', { count: fa(result.resumed ?? 0) })
+      const skipped = result.skipped?.length ?? 0
+      // The server names what it could not resume (no live job after a restart,
+      // a non-EPUB, a book that is not paused) rather than letting the count
+      // quietly disagree with the selection.
+      setBulkNotice(
+        skipped > 0
+          ? `${resumed} ${t('library.bulk.resumeSkipped', { count: fa(skipped) })}`
+          : resumed,
+      )
+      setSelected(new Set())
+      void client.invalidateQueries({ queryKey: ['library'] })
+    },
+    onError: () => setBulkNotice(t('library.bulk.error')),
+  })
+
+  // A selection is scoped to the page it was made on, so any change to what the
+  // page shows -- a new filter, a new sort, turning the page -- drops it rather
+  // than leaving the bar counting books that are no longer on screen.
+  useEffect(() => {
+    setSelected(new Set())
+    setBulkNotice('')
+  }, [page, query, filter, shelfFilter, tag, scope, modelFilter, since, until, sort])
+
+  const pageIds = items.map((book) => book.id)
+  const selectedBooks = items.filter((book) => selected.has(book.id))
+  const canDownload = selectedBooks.some((book) =>
+    (book.variants ?? []).some((variant) => variant.kind === 'translated' && Boolean(variant.download)),
+  )
+  const canResume = selectedBooks.some(isResumable)
+  const busy = bulkDelete.isPending || bulkResume.isPending
+
+  const runBulkDelete = () => {
+    const count = selectedCount(selected)
+    if (
+      !window.confirm(
+        `${t('library.bulk.confirmTitle', { count: fa(count) })}\n\n${t('library.bulk.confirmBody')}`,
+      )
+    ) {
+      return
+    }
+    bulkDelete.mutate()
+  }
+
+  const runBulkDownload = async () => {
+    const count = selectedCount(selected)
+    setBulkNotice('')
+    try {
+      const { blob, filename } = await api.libraryDownload([...selected])
+      // The zip is built whole server-side, so a blob URL streams it straight to
+      // disk. Revoking on the next tick -- not synchronously after `click()` --
+      // because an immediate revoke can cancel a download that has not started.
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setBulkNotice(t('library.bulk.downloaded', { count: fa(count) }))
+      setSelected(new Set())
+    } catch {
+      setBulkNotice(t('library.bulk.downloadError'))
+    }
   }
 
   const isEmptyLibrary = !counts.isPending && stats.total === 0
@@ -719,6 +898,88 @@ export function LibraryPage() {
               </span>
             </div>
 
+            {/* Server-side filters: model, where the search looks, the order,
+                and a date range. Each is its own labelled control so a screen
+                reader announces "Translation model", not just a combobox. */}
+            <div className="lib-filters mb-[var(--spacing-3)]">
+              <label className="lib-filter">
+                <span className="lib-filter-label">{t('library.filter.model')}</span>
+                <select
+                  className="field"
+                  value={modelFilter}
+                  onChange={(event) => {
+                    setModelFilter(event.target.value)
+                    setPage(1)
+                  }}
+                >
+                  <option value="">{t('library.filter.model.all')}</option>
+                  {models.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="lib-filter">
+                <span className="lib-filter-label">{t('library.filter.scope')}</span>
+                <select
+                  className="field"
+                  value={scope}
+                  onChange={(event) => {
+                    setScope(event.target.value as LibraryScope)
+                    setPage(1)
+                  }}
+                >
+                  {LIBRARY_SCOPES.map((key) => (
+                    <option key={key} value={key}>
+                      {t(SCOPE_KEY[key])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="lib-filter">
+                <span className="lib-filter-label">{t('library.sort')}</span>
+                <select
+                  className="field"
+                  value={sort}
+                  onChange={(event) => {
+                    setSort(event.target.value as LibrarySort)
+                    setPage(1)
+                  }}
+                >
+                  {LIBRARY_SORTS.map((key) => (
+                    <option key={key} value={key}>
+                      {t(SORT_KEY[key])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="lib-filter">
+                <span className="lib-filter-label">{t('library.filter.from')}</span>
+                <input
+                  type="date"
+                  className="field"
+                  value={since}
+                  onChange={(event) => {
+                    setSince(event.target.value)
+                    setPage(1)
+                  }}
+                />
+              </label>
+              <label className="lib-filter">
+                <span className="lib-filter-label">{t('library.filter.to')}</span>
+                <input
+                  type="date"
+                  className="field"
+                  value={until}
+                  onChange={(event) => {
+                    setUntil(event.target.value)
+                    setPage(1)
+                  }}
+                />
+              </label>
+            </div>
+
             <div className="mb-[var(--spacing-4)]">
               <div className="lib-tabs" role="group" aria-label={t('monitor.chunks.filterAria')}>
                 {LIBRARY_TABS.map((tab) => (
@@ -734,6 +995,63 @@ export function LibraryPage() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* The group-operation bar. It only appears once something is
+                selected, so it never takes a row of the list's chrome when the
+                reader is just browsing. The count is in Persian digits and the
+                cap is stated, because "why did book 101 not add" is otherwise a
+                silent refusal. */}
+            <div className="lib-listbar mb-[var(--spacing-3)]">
+              <label className="lib-select lib-select-all">
+                <input
+                  type="checkbox"
+                  checked={allSelected(pageIds, selected)}
+                  onChange={(event) =>
+                    setSelected(event.target.checked ? selectAll(pageIds) : new Set())
+                  }
+                  disabled={items.length === 0 || busy}
+                  aria-label={t('library.selectAll')}
+                />
+                <span>{t('library.selectAll')}</span>
+              </label>
+              {selected.size > 0 ? (
+                <div className="lib-bulk" role="group" aria-label={t('library.selected', { count: fa(selected.size) })}>
+                  <span className="lib-bulk-count">
+                    {t('library.selected', { count: fa(selected.size) })}
+                  </span>
+                  <button type="button" className="btn btn-secondary" onClick={runBulkDelete} disabled={busy}>
+                    {t('library.bulk.delete')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void runBulkDownload()}
+                    disabled={!canDownload || busy}
+                  >
+                    {t('library.bulk.download')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => bulkResume.mutate()}
+                    disabled={!canResume || busy}
+                  >
+                    {t('library.bulk.resume')}
+                  </button>
+                  <button type="button" className="btn" onClick={() => setSelected(new Set())}>
+                    {t('library.clearSelection')}
+                  </button>
+                  {/* The cap is a separate hint, not part of the count, so the
+                      count reads as a number and not a rule. */}
+                  <span className="lib-bulk-hint">{t('library.selectionCap', { max: fa(SELECTION_MAX) })}</span>
+                </div>
+              ) : null}
+              {bulkNotice ? (
+                <span className="lib-bulk-note" role="status">
+                  {bulkNotice}
+                </span>
+              ) : null}
             </div>
 
             {books.isError ? (
@@ -757,7 +1075,13 @@ export function LibraryPage() {
             ) : (
               <ul className="grid gap-[var(--spacing-2)]" style={{ opacity: books.isFetching ? 0.6 : 1 }}>
                 {items.map((book) => (
-                  <BookRow key={book.id} book={book} />
+                  <BookRow
+                    key={book.id}
+                    book={book}
+                    selected={selected.has(book.id)}
+                    onToggle={(id) => setSelected((current) => toggleSelected(current, id))}
+                    disabled={busy}
+                  />
                 ))}
               </ul>
             )}

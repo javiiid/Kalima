@@ -977,6 +977,17 @@ def _library_user_id(token: str = "") -> int:
     return book_shelves.resolve_user_id(db)
 
 
+def _safe_zip_name(value: str) -> str:
+    """One path-safe component for a download archive.
+
+    Book titles and file names come from users and can carry ``/``, ``..`` or
+    control characters; an archive that stores them verbatim invites a path
+    traversal on extraction, so every component is flattened first.
+    """
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(value or "")).strip().strip(".")
+    return (cleaned or "book")[:120]
+
+
 def library_summary(query: str = "", user_id: int | None = None) -> dict:
     params = parse_qs(query)
     search = params.get("q", [""])[0].strip().lower()
@@ -986,6 +997,18 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
     tag_filter = book_shelves.normalize_tag(params.get("tag", [""])[0]) if params.get("tag") else ""
     if shelf_filter and shelf_filter not in book_shelves.SHELVES:
         shelf_filter = ""
+    # ``scope=content`` widens the search box from the title to the translated
+    # text (the chunk store). Anything else is title-only, which is what the
+    # endpoint has always done.
+    scope = params.get("scope", ["title"])[0].strip().lower()
+    if scope != "content":
+        scope = "title"
+    model_filter = params.get("model", [""])[0].strip()
+    since = params.get("since", [""])[0].strip()[:10]
+    until = params.get("until", [""])[0].strip()[:10]
+    sort_key = params.get("sort", ["updated"])[0].strip().lower()
+    if sort_key not in {"updated", "created", "title", "size", "cost", "progress"}:
+        sort_key = "updated"
     uid = user_id if user_id is not None else book_shelves.resolve_user_id(db)
     archived_mode = status_filter == "archived"
     archived_flag = 1 if archived_mode else 0
@@ -1001,9 +1024,29 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
     files_by_book: dict[int, list[dict]] = {}
     for row in db.fetch_all(f"SELECT * FROM files WHERE user_id=? AND archived={archived_flag} ORDER BY book_id, CASE kind WHEN 'translated' THEN 0 ELSE 1 END, id", (uid,)):
         files_by_book.setdefault(row["book_id"], []).append(row)
+    # Full-text search inside the translated text is one query over the chunk
+    # store, not a walk over chapter files, so `scope=content` stays a single
+    # round trip however large the library is. `LIKE` is ASCII
+    # case-insensitive, and `search` is already lowercased.
+    content_hits: set[int] = set()
+    if search and scope == "content":
+        hit_rows = db.fetch_all(
+            "SELECT DISTINCT f.book_id AS book_id FROM job_chunks c "
+            "JOIN files f ON f.job_id = c.job_id "
+            "WHERE f.user_id=? AND f.archived=? AND c.translated_text LIKE ?",
+            (uid, archived_flag, f"%{search}%"),
+        )
+        content_hits = {int(row["book_id"]) for row in hit_rows if row["book_id"] is not None}
     items = []
     for book in books:
         if search and search not in book["title"].lower():
+            # A title hit is always shown; `content` only adds books whose
+            # translated text matches, so the box never hides a visible match.
+            if not (scope == "content" and int(book["id"]) in content_hits):
+                continue
+        if since and str(book.get("updated_at") or "")[:10] < since:
+            continue
+        if until and str(book.get("updated_at") or "")[:10] > until:
             continue
         shelf = shelf_by_book.get(int(book["id"]))
         tags = tags_by_book.get(int(book["id"]), [])
@@ -1017,10 +1060,10 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
         for file in files:
             if type_filter and file.get("extension", "").lower() != type_filter.lstrip("."):
                 continue
-            job = db.fetch_one("SELECT status, progress_completed, progress_total, source_language, target_language, model, error FROM jobs WHERE id=? AND user_id=?", (file.get("job_id"), uid)) if file.get("job_id") else None
+            job = db.fetch_one("SELECT status, progress_completed, progress_total, source_language, target_language, model, error, estimated_cost FROM jobs WHERE id=? AND user_id=?", (file.get("job_id"), uid)) if file.get("job_id") else None
             status = (job or {}).get("status") or ("completed" if file["kind"] in {"original", "translated"} else "unknown")
             statuses.append(status)
-            variant = {**file, "status": status, "progress": {"completed": (job or {}).get("progress_completed", 0), "total": (job or {}).get("progress_total", 0)}, "error": (job or {}).get("error")}
+            variant = {**file, "status": status, "progress": {"completed": (job or {}).get("progress_completed", 0), "total": (job or {}).get("progress_total", 0)}, "error": (job or {}).get("error"), "model": str((job or {}).get("model") or ""), "cost": round(float((job or {}).get("estimated_cost") or 0), 4)}
             if file.get("job_id") and file["kind"] == "translated":
                 variant["download"] = f"/downloads/{file['job_id']}"
                 if file.get("extension", "").lower() == "epub":
@@ -1036,6 +1079,9 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
             variants.append(variant)
         if not variants:
             continue
+        variant_models = [str(v.get("model") or "") for v in variants if v.get("model")]
+        if model_filter and model_filter not in variant_models:
+            continue
         overall = "archived" if archived_mode else ("completed" if any(s == "completed" for s in statuses) else ("running" if any(s in {"queued", "running"} for s in statuses) else ("failed" if any(s == "failed" for s in statuses) else "available")))
         if status_filter and status_filter not in statuses and status_filter != overall:
             continue
@@ -1046,12 +1092,35 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
             original = next((v for v in variants if v.get("kind") == "original" and Path(str(v.get("path", ""))).is_file()), None)
             if original is not None:
                 cover_path = _store_book_cover(int(book["id"]), Path(str(original["path"])), uid)
-        items.append({"id": book["id"], "title": book["title"], "author": book.get("author", ""), "cover_path": cover_path, "created_at": book["created_at"], "updated_at": book["updated_at"], "status": overall, "shelf": shelf, "tags": tags, "variants": variants, "size_bytes": sum(int(item.get("size_bytes", 0)) for item in variants), "translated": any(item["kind"] == "translated" for item in variants), "readable": any(item.get("reader") for item in variants)})
+        items.append({"id": book["id"], "title": book["title"], "author": book.get("author", ""), "cover_path": cover_path, "created_at": book["created_at"], "updated_at": book["updated_at"], "status": overall, "shelf": shelf, "tags": tags, "variants": variants, "size_bytes": sum(int(item.get("size_bytes", 0)) for item in variants), "translated": any(item["kind"] == "translated" for item in variants), "readable": any(item.get("reader") for item in variants), "model": variant_models[0] if variant_models else "", "cost": round(sum(float(v.get("cost") or 0) for v in variants), 4)})
     total = len(items)
+    # Sorting happens after every filter so the order is over the whole set,
+    # not the page: a client-side sort over one page would be wrong the moment
+    # a library has a second page.
+    def _progress_percent(item: dict) -> float:
+        for variant in item["variants"]:
+            if variant.get("kind") == "translated":
+                total = int(variant.get("progress", {}).get("total") or 0)
+                if total:
+                    return round(int(variant.get("progress", {}).get("completed") or 0) * 100 / total)
+        return 0
+
+    if sort_key == "title":
+        items.sort(key=lambda item: item["title"].lower())
+    elif sort_key == "size":
+        items.sort(key=lambda item: item["size_bytes"], reverse=True)
+    elif sort_key == "cost":
+        items.sort(key=lambda item: item["cost"], reverse=True)
+    elif sort_key == "progress":
+        items.sort(key=_progress_percent, reverse=True)
+    elif sort_key == "created":
+        items.sort(key=lambda item: item["created_at"], reverse=True)
+    else:
+        items.sort(key=lambda item: item["updated_at"], reverse=True)
     try: page, limit = max(1, int(params.get("page", [1])[0])), max(1, min(100, int(params.get("limit", [24])[0])))
     except ValueError: page, limit = 1, 24
     start = (page - 1) * limit
-    return {"items": items[start:start + limit], "total": total, "page": page, "limit": limit, "storage": {"used": sum(item["size_bytes"] for item in items), "free": shutil.disk_usage(ensure_dir("data")).free}}
+    return {"items": items[start:start + limit], "total": total, "page": page, "limit": limit, "storage": {"used": sum(item["size_bytes"] for item in items), "free": shutil.disk_usage(ensure_dir("data")).free}, "models": sorted({str(row["model"]) for row in db.fetch_all("SELECT DISTINCT model FROM jobs WHERE user_id=? AND model<>''", (uid,))})}
 
 
 PAGE = r'''<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KALIMA</title><style>
@@ -1655,6 +1724,23 @@ class Handler(BaseHTTPRequestHandler):
         if job is not None and int(job.user_id) != self._user_id():
             return None
         return job
+    def _resumable_job_for_book(self, book_id: int) -> Job | None:
+        """The live job a bulk resume would continue, or ``None``.
+
+        Mirrors ``_job_payload.can_resume``: a resume needs a job still held in
+        memory to rebuild the pipeline from, an EPUB that restarted cleanly, and
+        a paused/failed run. Restarted servers have no in-memory job to resume,
+        so those books are reported skipped instead of silently lost.
+        """
+        rows = db.fetch_all(
+            "SELECT job_id FROM files WHERE book_id=? AND user_id=? AND job_id IS NOT NULL ORDER BY id",
+            (book_id, self._user_id()),
+        )
+        for row in rows:
+            job = self._job(str(row["job_id"]))
+            if job and job.filetype == "epub" and job.pipeline_job_id and job.status in {"paused", "failed"}:
+                return job
+        return None
     def _request_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
         if length > 2 * 1024 * 1024:
@@ -2400,6 +2486,91 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "download": f"/downloads/rescue/{job.id}", "size": rescue_path.stat().st_size}, 201)
             except OSError as exc: self._json({"error": str(exc)}, 500)
             return
+        if path == "/api/library/bulk":
+            # One endpoint for the library's group operations. The archive
+            # route edits a single book, and a 50-book library needs the same
+            # verbs over a selection without 50 round trips.
+            try:
+                body = self._request_json()
+            except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
+            action = str(body.get("action") or "").strip().lower()
+            raw_ids = body.get("ids")
+            if not isinstance(raw_ids, list):
+                self._json({"error": "فهرست کتاب‌ها نامعتبر است."}, 400); return
+            ids: list[int] = []
+            for value in raw_ids:
+                try:
+                    ids.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            # The client caps its selection at one page; this is the backstop
+            # against a hand-built request trying to touch the whole table.
+            ids = list(dict.fromkeys(ids))[:100]
+            if not ids:
+                self._json({"error": "کتابی انتخاب نشده است."}, 400); return
+            uid = self._user_id()
+            if action == "delete":
+                # Same rows the single-book archive route hides, so a bulk
+                # delete is only ever N of the action the UI already offers.
+                deleted = 0
+                for book_id in ids:
+                    if not self._owned_book(book_id):
+                        continue
+                    db.execute("UPDATE library_books SET archived=1, updated_at=? WHERE id=? AND user_id=?", (now(), book_id, uid))
+                    db.execute("UPDATE files SET archived=1 WHERE book_id=? AND user_id=?", (book_id, uid))
+                    deleted += 1
+                self._json({"ok": True, "action": "delete", "deleted": deleted, "requested": len(ids)}); return
+            if action == "resume":
+                resumed = 0
+                skipped: list[dict] = []
+                for book_id in ids:
+                    if not self._owned_book(book_id):
+                        skipped.append({"id": book_id, "reason": "not_found"}); continue
+                    job = self._resumable_job_for_book(book_id)
+                    if job is None:
+                        skipped.append({"id": book_id, "reason": "not_resumable"}); continue
+                    job.stop_event = threading.Event(); job.cancel_requested = False
+                    job.status = "queued"; job.error = None; job.last_activity = job.updated_at = now()
+                    _persist_job(job)
+                    _job_event(job, "resume_queued", "ادامه از آخرین جای سالم وارد صف شد.")
+                    threading.Thread(target=_run_job, args=(job,), kwargs={"resume": True}, daemon=True).start()
+                    resumed += 1
+                self._json({"ok": True, "action": "resume", "resumed": resumed, "skipped": skipped, "requested": len(ids)}); return
+            if action == "download":
+                # The whole archive is built in memory and written once: a
+                # chunked/streamed zip on this HTTP/1.0 handler corrupts the
+                # stream the moment the client disconnects.
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                    count = 0
+                    for book_id in ids:
+                        book = self._owned_book(book_id)
+                        if not book:
+                            continue
+                        rows = db.fetch_all("SELECT * FROM files WHERE book_id=? AND user_id=? AND kind='translated' ORDER BY id", (book_id, uid))
+                        for index, row in enumerate(rows):
+                            source = Path(str(row.get("path") or ""))
+                            if not source.is_file():
+                                continue
+                            name = _safe_zip_name(str(row.get("display_name") or source.name))
+                            if index:
+                                stem, dot, ext = name.rpartition(".")
+                                name = f"{stem}-{index}{dot}{ext}" if dot else f"{name}-{index}"
+                            archive.write(source, f"{_safe_zip_name(book.get('title'))}/{name}")
+                            count += 1
+                if not count:
+                    self._json({"error": "خروجی ترجمه‌ای برای دانلود پیدا نشد."}, 404); return
+                payload = buffer.getvalue()
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Disposition", 'attachment; filename="kalima-library.zip"')
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers(); self.wfile.write(payload)
+                except _CLIENT_GONE:
+                    pass
+                return
+            self._json({"error": "عملیات گروهی ناشناخته است."}, 400); return
         if path!="/api/jobs": self.send_error(404); return
         uid = self._user_id()
         content_type = self.headers.get("Content-Type", "")

@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 
+from app.pipeline.epub_toc import rebuild_epub_structure
 from app.pipeline.semantic_chunker import SemanticChunker, strip_tags
 from app.reader.service import _spine_items, _title
 
@@ -157,3 +158,11 @@ def write_translation(document, translations, output_path, target_language):
                     pass
             target.writestr(entry, data)
     temporary.replace(output_path)
+
+    # Rebuild navigation (TOC), internal chapter links, and spine so the
+    # translated EPUB matches the actual chapter contents instead of the
+    # source structure. Calibration must not fail because of this step.
+    try:
+        rebuild_epub_structure(output_path, output_path)
+    except Exception:
+        pass

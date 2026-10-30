@@ -118,15 +118,16 @@ describe('usd', () => {
 })
 
 describe('maskSecretLike', () => {
-  /* Every one of these came out of a real database or a real config file. */
+  /* Shape-only fixtures. Two real keys and a real token that used to sit here
+     were removed and must be rotated; see scripts/scan_secrets.py. */
   const SECRETS = [
-    'sk-kXVqGs4XodYyJejWfYvIIG0HJhajJ0r8ZPSI80gtLlqeiBJK',
-    'sk-t2zlniCgJBQTQbDbX7q3rlVmIqmE0GtpFFoH8kHdQHHLdSKu',
+    'sk-k0EXAMPLEnotarealkey0000000000',
+    'sk-0EXAMPLEnotarealkey1111111111',
     'sk-proj-abc123XYZ-_456',
     'jbt_live_GG4e9Q2restoftheprefix',
     'pk_live_51H8xYzabcdefghijklmnop',
     'api_key_0123456789abcdef0123456789abcdef',
-    'ghp_16C7e42F292c6912E7710c838347Ae178B4a',
+    'ghp_0EXAMPLEnotarealtoken000000000000',
     'a'.repeat(64),
     'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0',
   ]

@@ -188,6 +188,10 @@ data/
 # Anchored like /output/: frontend/docs/ stays tracked.
 /docs/
 
+# The execution roadmap is a personal planning artifact like docs/: kept on
+# disk, but not product documentation. Anchored so it stays at the repo root.
+/ROADMAP.md
+
 # ============================================================
 # Local Windows Shortcuts
 # ============================================================

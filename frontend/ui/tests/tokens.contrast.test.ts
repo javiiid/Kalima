@@ -187,8 +187,9 @@ const PAIRS: Pair[] = [
   // surface rather than the page, because that is what it is drawn on.
   ['day', '--color-nav-indicator-ink', '--color-nav-indicator', AA, 'day: the selected bar icon on its fill'],
   ['dark', '--color-nav-indicator-ink', '--color-nav-indicator', AA, 'dark: the selected bar icon on its fill'],
-  ['day', '--color-nav-divider', '--color-surface', AA_NON_TEXT, 'day: mobile bar chrome divider'],
-  ['dark', '--color-nav-divider', '--color-surface', AA_NON_TEXT, 'dark: mobile bar chrome divider'],
+  // The divider before the theme switch is --color-border, the same line as
+  // the bar's top edge: it is a separator, not information, so tokens.css
+  // deliberately gives it no separate contrast pair.
   // And the unselected label, which is the other thing on the bar.
   ['day', '--color-text-muted', '--color-surface', AA, 'day: an unselected bar label on the bar'],
   // The primary action at rest uses the normal primary/inverse pair above;

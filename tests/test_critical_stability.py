@@ -187,6 +187,39 @@ def test_restart_recovery_marks_active_web_job_paused(tmp_path, monkeypatch):
     assert web.JOBS["restart-1"].status == "paused"
 
 
+def test_kill9_mid_book_resumes_on_restart(tmp_path, monkeypatch):
+    """The container is killed mid-book: restart must resume, never lose it.
+
+    Simulates the abrupt death by leaving an active job on disk and an empty
+    in-memory map, then booting through ``restore_jobs`` like ``main()`` does.
+    """
+    import time
+
+    import app.web as web
+
+    input_path = tmp_path / "book.epub"
+    _make_epub(input_path, "<p>resume</p>")
+    monkeypatch.setattr(web, "JOB_META_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(web, "JOBS", {})
+    job = web.Job("killed-1", input_path.name, input_path, "epub", input_path.stat().st_size,
+                  {"from_lang": "EN", "to_lang": "FA", "model": "test", "mode": "fast", "prompt": "", "debug": "true"},
+                  "EN", "FA", "test", "fast", status="running", pipeline_job_id="pipeline-9")
+    web._persist_job(job)          # committed state survives the kill
+    web.JOBS.clear()               # process memory is gone
+
+    resumed: list[tuple[str, bool]] = []
+    monkeypatch.setattr(web, "_run_job", lambda job, **kwargs: resumed.append((job.id, bool(kwargs.get("resume")))))
+    web.restore_jobs()
+
+    # Restored, marked resumable (never mis-marked complete) ...
+    assert web.JOBS["killed-1"].status == "paused"
+    # ... and actually queued to resume, not just parked.
+    deadline = time.time() + 2
+    while not resumed and time.time() < deadline:
+        time.sleep(0.01)
+    assert resumed == [("killed-1", True)]
+
+
 def test_output_incomplete_is_detectable(tmp_path):
     output = tmp_path / "missing.pdf"
     assert not output.exists()

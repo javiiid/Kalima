@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import threading
+import time
 import traceback
 import uuid
 import zipfile
@@ -43,6 +44,8 @@ from app.core.models import (
     resolve_default_model,
 )
 from app.core.paths import ensure_dir
+from app.core.metrics import METRICS, prometheus_text
+from app.version import get_version
 from app.core.validation import ensure_disk_space, validate_book
 from app.core.web_i18n import inject_language_switcher
 from app.pipeline.pipeline import translate
@@ -125,7 +128,92 @@ JOB_META_DIR.mkdir(parents=True, exist_ok=True)
 CSRF_COOKIE = "kalima_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 DEFAULT_QUOTA_BYTES = 5 * 1024 * 1024 * 1024
+KALIMA_VERSION = get_version()
 
+#: The React build served on the same origin as the API. Dev keeps using the
+#: Vite server; this path is only used when a built bundle is present (or when
+#: KALIMA_UI_DIST / KALIMA_SERVE_SPA overrides it). See
+#: frontend/docs/audit_bundle.py for the pre-flight check on that bundle.
+_DEFAULT_UI_DIST = Path(__file__).resolve().parent.parent / "frontend" / "ui" / "dist"
+
+#: Headers every SPA/asset response carries. The reverse proxy adds HSTS on
+#: top, but these hold even when the Python server is reached directly.
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+}
+
+#: CSP for the app shell. img-src must allow the reader's server-sanitised
+#: chapter illustrations (/reader/<id>/asset/...); style-src needs
+#: 'unsafe-inline' because React sets inline style attributes.
+SPA_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
+    "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+)
+
+
+def spa_dist_dir() -> Path | None:
+    """The built React bundle, or ``None`` when there is nothing to serve."""
+    override = (os.environ.get("KALIMA_UI_DIST") or "").strip()
+    base = Path(override) if override else _DEFAULT_UI_DIST
+    return base if (base / "index.html").is_file() else None
+
+
+def spa_enabled() -> bool:
+    """Whether the backend answers client routes with the SPA shell.
+
+    Default is "auto": on when a build exists. ``KALIMA_SERVE_SPA=0`` keeps the
+    legacy server-rendered pages for a local deployment that still wants them.
+    """
+    flag = (os.environ.get("KALIMA_SERVE_SPA") or "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    return spa_dist_dir() is not None
+
+
+_ACCESS_LOGGER: "StructuredLogger | None | bool" = None
+
+
+def _app_access_logger():
+    """Lazy JSONL access/error log; ``None`` when it cannot be opened."""
+    global _ACCESS_LOGGER
+    if _ACCESS_LOGGER is None:
+        try:
+            from app.core.structured_logging import get_app_logger
+
+            _ACCESS_LOGGER = get_app_logger()
+        except Exception:
+            _ACCESS_LOGGER = False
+    return _ACCESS_LOGGER or None
+
+
+def _record_request(method: str, path: str, status: int, duration_ms: float) -> None:
+    """Meter one finished request: counters + one structured log line."""
+    try:
+        METRICS.record(method, path, status, duration_ms)
+    except Exception:
+        pass
+    logger = _app_access_logger()
+    if logger is None:
+        return
+    try:
+        logger.emit(
+            "http_request",
+            f"{method} {path} -> {status}",
+            level="ERROR" if int(status) >= 500 else "INFO",
+            durable=False,
+            method=method,
+            path=path,
+            status=int(status),
+            duration_ms=round(duration_ms, 2),
+        )
+    except OSError:
+        pass
 
 def user_upload_dir(user_id: int) -> Path:
     directory = UPLOAD_DIR / str(int(user_id))
@@ -1309,6 +1397,69 @@ class _RescueConflict(ValueError):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None: return
 
+    def send_response(self, code: int, message: str | None = None) -> None:
+        """Record the status so ``handle_one_request`` can meter it once."""
+        self._status_code = int(code)
+        super().send_response(code, message)
+
+    def handle_one_request(self) -> None:
+        self._status_code = 0
+        started = time.perf_counter()
+        try:
+            super().handle_one_request()
+        finally:
+            code = getattr(self, "_status_code", 0)
+            if code:
+                path = urlparse(self.path).path if getattr(self, "path", None) else ""
+                _record_request(self.command or "", path, code, (time.perf_counter() - started) * 1000)
+
+    def _send_spa_file(self, file_path: Path, *, immutable: bool) -> None:
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        extra = dict(SECURITY_HEADERS)
+        if immutable:
+            extra["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            extra["Cache-Control"] = "no-cache"
+            if content_type.startswith("text/html"):
+                extra["Content-Security-Policy"] = SPA_CSP
+        self._send_file(file_path, content_type, extra=extra)
+
+    def _serve_spa(self, path: str) -> bool:
+        """Serve the built SPA; return True when a response was written.
+
+        A real file wins (hashed assets, fonts, favicon). An extension-less
+        path falls back to ``index.html`` so the client router owns deep links
+        like ``/library`` or ``/reader/<id>``. Backend-owned prefixes and
+        missing files are left to the caller so its own 404 still happens.
+        """
+        if not spa_enabled():
+            return False
+        dist = spa_dist_dir()
+        if dist is None:
+            return False
+        rel = unquote(path).lstrip("/")
+        if not rel:
+            rel = "index.html"
+        elif rel.split("/", 1)[0] in {"api", "covers", "downloads"}:
+            return False
+        # Sourcemaps expose the original TypeScript; never serve them. The
+        # bundle ships them for local debugging only (frontend/docs/audit_bundle.py
+        # flags them as do-not-serve-in-production).
+        if rel.endswith(".map"):
+            return False
+        root = dist.resolve()
+        candidate = (dist / rel).resolve()
+        if candidate != root and root not in candidate.parents:
+            return False  # path traversal attempt: leave it to the 404
+        if candidate.is_file():
+            self._send_spa_file(candidate, immutable=rel.startswith("assets/"))
+            return True
+        index = dist / "index.html"
+        if "." not in Path(rel).name and index.is_file():
+            self._send_spa_file(index, immutable=False)
+            return True
+        return False
+
     def end_headers(self) -> None:
         """Attach the per-request security headers exactly once."""
         origin = (self.headers.get("Origin") or "").strip().rstrip("/")
@@ -1613,14 +1764,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(reader_chapter(job.output_path, chapter_id, asset_prefix=asset_prefix))
             except (IndexError, ValueError, OSError, zipfile.BadZipFile) as exc: self._json({"error": str(exc)}, 404)
             return
-        if parsed.path.startswith("/workspace/job/"):
+        if not spa_enabled() and parsed.path.startswith("/workspace/job/"):
             job = self._job(parsed.path.rstrip("/").rsplit("/", 1)[-1])
             if not job: self.send_error(404); return
             data = job_detail_page(job.id).encode("utf-8")
             try: self.send_response(HTTPStatus.OK); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
             except _CLIENT_GONE: pass
             return
-        if parsed.path.startswith("/reader/"):
+        if not spa_enabled() and parsed.path.startswith("/reader/"):
             job = self._job(parsed.path.rsplit("/", 1)[-1])
             if not job or job.filetype != "epub" or not job.output_path or not job.output_path.is_file(): self.send_error(404); return
             data = reader_page(job.id).encode("utf-8")
@@ -1774,8 +1925,24 @@ class Handler(BaseHTTPRequestHandler):
                 config = get_openai_config()
                 if "verify=1" in parsed.query: OpenAI(**config).models.list(); message = "اتصال سرویس ترجمه برقرار است"
                 else: message = "تنظیمات سرویس ترجمه آماده است"
-                self._json({"status":"ready","message":message}); return
-            except Exception as exc: self._json({"status":"error","message":_friendly_error(exc)}); return
+                self._json({"status":"ready","message":message,"version":KALIMA_VERSION}); return
+            except Exception as exc: self._json({"status":"error","message":_friendly_error(exc),"version":KALIMA_VERSION}); return
+        if parsed.path == "/api/version":
+            self._json({"name": "kalima", "version": KALIMA_VERSION}); return
+        if parsed.path == "/api/metrics":
+            if not self._is_admin():
+                self._json({"error": "متریک‌های سرور فقط برای مدیر است."}, 403); return
+            snapshot = METRICS.snapshot()
+            if parse_qs(parsed.query).get("format", [""])[0] == "prometheus":
+                body = prometheus_text(snapshot).encode("utf-8")
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body)
+                except _CLIENT_GONE: pass
+                return
+            self._json({"version": KALIMA_VERSION, **snapshot}); return
         if parsed.path.startswith("/api/jobs/") and parsed.path.count("/") == 3:
             job=self._job(parsed.path.rsplit("/",1)[-1])
             if not job: self._json({"error":"کار موردنظر پیدا نشد."},404); return
@@ -1842,6 +2009,7 @@ class Handler(BaseHTTPRequestHandler):
             if not job or not job.output_path or not job.output_path.is_file(): self.send_error(404); return
             self._send_file(job.output_path, "application/octet-stream", f'attachment; filename="{job.output_path.name}"')
             return
+        if self._serve_spa(parsed.path): return
         self.send_error(404)
     def do_POST(self) -> None:
         if not self._guarded(): return

@@ -23,7 +23,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kalima"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Translate EPUB and PDF books with any OpenAI-compatible API — chunked, resumable, with a human-approved glossary."
 readme = "readme.md"
 requires-python = ">=3.11"
@@ -92,6 +92,11 @@ kalima-web = "app.web:main"
 # Ship only the application package; tests, scripts and frontend/ui
 # stay out of the wheel.
 include = ["app*"]
+
+# The version lives in exactly one place: app/version.py. Setuptools reads it
+# back here so pyproject never drifts from what /api/version reports.
+[tool.setuptools.dynamic]
+version = {attr = "app.version.__version__"}
 
 # Runtime assets referenced with Path(__file__) inside the package:
 # app/presets/styles.json, app/output/fonts/*.ttf, app/library/*.woff2,

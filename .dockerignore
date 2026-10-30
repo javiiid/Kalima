@@ -1,0 +1,27 @@
+# Never ship the developer's runtime state or the live key into an image layer.
+.git
+.gitignore
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.test-tmp/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+frontend/ui/node_modules/
+# The bundle is built inside the image (stage 1), not copied from the host.
+frontend/ui/dist/
+data/
+temp/
+output/
+config/config.yaml
+docs/
+.opencode/
+*.log
+*.pdf
+*.epub

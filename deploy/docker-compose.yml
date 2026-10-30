@@ -1,0 +1,55 @@
+# Single-host KALIMA deployment: the Python app (built UI included) behind Caddy
+# for TLS and security headers.
+#
+#   cd deploy
+#   KALIMA_DOMAIN=books.example.com docker compose up -d --build
+#
+# The app port is not published to the host — only Caddy reaches it. Point the
+# domain's A/AAAA record at this host first; Caddy obtains the certificate.
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      KALIMA_ENV: production
+      KALIMA_HOST: 0.0.0.0
+      KALIMA_PORT: "8765"
+      # The browser reaches the app at this name; the Host/DNS-rebinding check
+      # and the CORS allowlist must both know it (never "*").
+      KALIMA_ALLOWED_HOSTS: ${KALIMA_DOMAIN:?set KALIMA_DOMAIN, e.g. books.example.com}
+      KALIMA_CORS_ORIGINS: https://${KALIMA_DOMAIN:?set KALIMA_DOMAIN}
+      KALIMA_SECURE_COOKIES: "1"
+      KALIMA_USER_QUOTA_BYTES: ${KALIMA_USER_QUOTA_BYTES:-5368709120}
+    volumes:
+      # Persistent state: database, jobs, uploads, covers, logs.
+      - kalima-data:/app/data
+      # Translated outputs / rescue archives (safe to back up separately).
+      - kalima-output:/app/output
+      # The provider key lives here (config/config.yaml), mounted read-write so
+      # the admin /account page can update it. Gitignored — never committed.
+      - ../config:/app/config
+    expose:
+      - "8765"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      KALIMA_DOMAIN: ${KALIMA_DOMAIN:?set KALIMA_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  kalima-data:
+  kalima-output:
+  caddy-data:
+  caddy-config:

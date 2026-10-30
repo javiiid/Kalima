@@ -1,0 +1,23 @@
+# Caddy terminates TLS (automatic Let's Encrypt) and adds the security headers
+# that must hold for every response, including the static React bundle.
+#
+# KALIMA_DOMAIN is supplied by docker-compose. The Python app never sees port
+# 80/443 and is never published directly.
+{$KALIMA_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# Two years, subdomains included. Safe once the domain is HTTPS-only.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		# Do not advertise the server software.
+		-Server
+	}
+
+	# app/web.py already sets a CSP on the app shell; this reverses proxy to the
+	# private network only.
+	reverse_proxy app:8765
+}

@@ -1,0 +1,38 @@
+# Prometheus alerting for the counters exposed at GET /api/metrics?format=prometheus.
+# Scrape that endpoint as a counter; Prometheus turns the cumulative totals into
+# rates. Load with: prometheus --web.enable-lifecycle + rule_files: [alert.rules.yml]
+groups:
+  - name: kalima
+    rules:
+      - alert: KalimaHigh5xxRate
+        # More than 5% of responses are 5xx over 10 minutes (with a small floor
+        # so a single error on a quiet server does not page).
+        expr: |
+          (
+            sum(rate(kalima_http_requests_total{status_class="5xx"}[5m]))
+            /
+            clamp_min(sum(rate(kalima_http_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "KALIMA 5xx rate above 5% for 10 minutes"
+          description: "Check data/logs/app.jsonl for level=ERROR records and the deploy logs."
+
+      - alert: KalimaServerErrors
+        # Any 5xx at all, sustained for 5 minutes — a warning, not a page.
+        expr: increase(kalima_http_server_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KALIMA is returning 5xx responses"
+
+      - alert: KalimaDown
+        expr: up{job="kalima"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "KALIMA scrape target is down"

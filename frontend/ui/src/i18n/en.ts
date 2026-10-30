@@ -908,6 +908,7 @@ export const en: Record<StringKey, string> = {
   'reader.side.original': 'Source text',
   'reader.side.translation': 'Translation',
   'reader.loadError': 'Could not load this chapter.',
+  'reader.unavailable': 'No translated file for this book is available on the server.',
   'reader.noBilingual': 'This chapter is not aligned bilingually; try the “Translation” mode.',
   'reader.theme': 'Theme',
   'reader.theme.light': 'Light',

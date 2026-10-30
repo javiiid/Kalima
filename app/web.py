@@ -505,30 +505,81 @@ def _register_library_output(job: Job) -> None:
     db.execute("INSERT INTO files(user_id, job_id, book_id, path, kind, display_name, extension, mime_type, language, size_bytes, checksum, is_readable, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM files WHERE job_id=? AND kind=? AND user_id=?)", (int(job.user_id), job.id, book_id, str(job.output_path), "translated", job.output_path.name, job.filetype, mimetypes.guess_type(job.output_path.name)[0] or "application/octet-stream", job.target_language, job.output_path.stat().st_size, digest.hexdigest(), int(job.filetype == "epub"), timestamp, job.id, "translated", int(job.user_id)))
 
 
+def _restored_job_owner(data: dict) -> int:
+    """Resolve a restored job's owner.
+
+    Snapshots written before jobs became user-scoped carry no ``user_id``.
+    Blindly falling back to user 1 parks every restored book under an owner
+    nobody is signed in as, so both ``/api/jobs`` and the reader (which
+    filter on the session's user) stop seeing it -- the book lists in the
+    library but opening it 404s forever. Prefer the snapshot, then the
+    authoritative DB row, and only then the legacy single-user default.
+    """
+    snapshot = data.get("user_id")
+    if snapshot:
+        return int(snapshot)
+    try:
+        row = db.fetch_one("SELECT user_id FROM jobs WHERE id=?", (str(data.get("id") or ""),))
+    except Exception:  # the observability index must not block recovery
+        row = None
+    return int((row or {}).get("user_id") or 1)
+
+
+def _backfill_job_owner(metadata_path: Path, data: dict, owner: int) -> None:
+    """Persist a resolved owner so a later restore cannot lose it again."""
+    try:
+        payload = dict(data)
+        payload["user_id"] = owner
+        temporary = metadata_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+        temporary.replace(metadata_path)
+    except OSError:
+        pass
+
+
 def restore_jobs() -> None:
     """Restore jobs from metadata and mark interrupted work resumable."""
     recover = []
-    for metadata_path in JOB_META_DIR.glob("*.json"):
+    # Materialised: the loop rewrites snapshots in place, and a lazily
+    # iterated directory on Windows may skip entries it sees change.
+    for metadata_path in sorted(JOB_META_DIR.glob("*.json")):
         try:
             data = json.loads(metadata_path.read_text(encoding="utf-8"))
             input_path = Path(data["input_path"])
-            if not input_path.exists():
+            output_path = Path(data["output_path"]) if data.get("output_path") else None
+            input_present = input_path.exists()
+            # A finished book must stay readable after its uploaded source is
+            # pruned (the reader serves the translated EPUB, not the input).
+            # Skip the snapshot only when neither file survives.
+            if not input_present and not (output_path and output_path.is_file()):
                 continue
             job = Job(data["id"], data["filename"], input_path, data["filetype"], data["file_size"],
                 data.get("options", {}), data["source_language"], data["target_language"],
                 data["model"], data["mode"], data.get("status", "failed"), data.get("created_at", now()),
                 data.get("started_at"), data.get("updated_at", now()), data.get("updated_at", now()),
                 data.get("pipeline_job_id"), data.get("paths"), io.StringIO(), threading.Event(),
-                Path(data["output_path"]) if data.get("output_path") else None, data.get("error"), False,
+                output_path, data.get("error"), False,
                 data.get("progress", {"completed": 0, "total": 0}),
                 assets=data.get("assets") or {}, qa_report=data.get("qa_report"),
                 quality=data.get("quality"), style=data.get("style", "literary"))
-            job.user_id = int(data.get("user_id") or 1)
+            owner = _restored_job_owner(data)
+            job.user_id = owner
+            if not data.get("user_id"):
+                _backfill_job_owner(metadata_path, data, owner)
             job.estimated_cost = float(data.get("estimated_cost") or 0.0)
+            resumable = False
             was_active = job.status in {"queued", "running"}
             if was_active:
-                job.status = "paused" if job.pipeline_job_id else "failed"
-                job.error = None if job.pipeline_job_id else "Job stopped before a resumable state was created."
+                # Resuming re-reads the source, so a pruned upload cannot be
+                # continued -- report it instead of queueing a doomed run.
+                resumable = bool(job.pipeline_job_id) and input_present
+                job.status = "paused" if resumable else "failed"
+                job.error = None if resumable else (
+                    "The uploaded source file is missing, so this job cannot be resumed."
+                    if job.pipeline_job_id else "Job stopped before a resumable state was created."
+                )
             JOBS[job.id] = job
             try:
                 _ensure_library_source(job)
@@ -536,7 +587,7 @@ def restore_jobs() -> None:
                     _register_library_output(job)
             except Exception:
                 pass
-            if was_active and job.pipeline_job_id and job.filetype == "epub":
+            if resumable and job.filetype == "epub":
                 recover.append(job)
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             continue

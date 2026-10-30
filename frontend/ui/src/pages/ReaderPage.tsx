@@ -613,6 +613,12 @@ export function ReaderPage() {
   )
 
   const items = chapterItems
+  // A book the server cannot serve (missing translation, or one that is not
+  // ours) fails on the chapter list, which disables the chapter query -- so
+  // without this branch the body would sit on a skeleton forever. The server
+  // explains itself in English (its wording is not localized), so show the
+  // reader's own sentence instead of leaking that into a Persian page.
+  const bookError = t('reader.unavailable')
 
   return (
     // The main carries `.page` literally (the gutter owner); the reader theme
@@ -629,7 +635,7 @@ export function ReaderPage() {
         {/* ---- chapter list ---- */}
         <nav className="surface-card h-fit p-3" aria-label={t('reader.chapters')}>
           <h2 className="px-2 py-1 text-[length:var(--text-label)] font-bold">{t('reader.chapters')}</h2>
-          {chapters.isPending ? (
+          {chapters.isError ? null : chapters.isPending ? (
             <div className="skeleton" style={{ height: 120 }} />
           ) : items.length === 0 ? (
             <p className="empty">{t('reader.noChapters')}</p>
@@ -897,7 +903,11 @@ export function ReaderPage() {
             className="surface-card mx-auto w-full p-6"
             style={{ maxHeight: '70vh', overflow: 'auto', fontSize, lineHeight, maxWidth: width }}
           >
-            {content.isPending ? (
+            {chapters.isError ? (
+              <p role="alert" className="alert alert-error">
+                {bookError}
+              </p>
+            ) : content.isPending ? (
               <div className="skeleton" style={{ height: 320 }} />
             ) : content.isError ? (
               <p role="alert" className="alert alert-error">

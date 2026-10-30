@@ -926,6 +926,7 @@ export const fa = {
   'reader.side.original': 'متن اصلی',
   'reader.side.translation': 'ترجمه',
   'reader.loadError': 'بارگذاری این فصل ممکن نشد.',
+  'reader.unavailable': 'فایل ترجمهٔ این کتاب روی سرور موجود نیست.',
   'reader.noBilingual': 'این فصل به‌صورت دوزبانه هم‌تراز نشده است؛ حالت «ترجمه» را امتحان کنید.',
   'reader.theme': 'پوسته',
   'reader.theme.light': 'روشن',

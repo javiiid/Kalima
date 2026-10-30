@@ -9,19 +9,24 @@ from urllib.parse import urlparse
 from app.calibration.service import CalibrationService
 from app.calibration.store import Conflict, BudgetExceeded
 
-_service = None
+_services: dict[int, CalibrationService] = {}
 _lock = threading.Lock()
 
 
-def get_service():
-    global _service
+def get_service(user_id: int = 1):
+    """Return the per-user calibration service (Phase 1: sessions are scoped)."""
+    uid = int(user_id or 1)
     with _lock:
-        if _service is None:
+        service = _services.get(uid)
+        if service is None:
             from app.storage.database import db
             from app.core.paths import ensure_dir
-            _service = CalibrationService(db, ensure_dir("data") / "calibrations")
-            _service.recover()
-    return _service
+            service = CalibrationService(
+                db, ensure_dir("data") / "calibrations" / str(uid), user_id=uid
+            )
+            service.recover()
+            _services[uid] = service
+    return service
 
 
 def start_job(service, session):
@@ -37,7 +42,8 @@ def start_job(service, session):
                    "fallback_model": p.get("fallback_model"),
                    "glossary_snapshot": json.dumps({"terms": [t for t in p["glossary"] if t["approved"]], "auto_extract": False}, ensure_ascii=False)}
         job = web.Job(identifier, Path(session["filename"]).stem + ".epub", path, "epub", path.stat().st_size,
-                      options, p["from_lang"], p["to_lang"], p["final_model"], "fast", style=p["tone"])
+                      options, p["from_lang"], p["to_lang"], p["final_model"], "fast", style=p["tone"],
+                      user_id=int(session.get("user_id") or 1))
         web.JOBS[identifier] = job
         web._persist_job(job)
         web._ensure_library_source(job)
@@ -51,7 +57,7 @@ def handle(handler, method):
     if not (path == "/api/calibrations" or path.startswith("/api/calibrations/") or path.startswith("/api/calibration-operations/")):
         return False
     try:
-        service = get_service()
+        service = get_service(handler._user_id())
         if path.startswith("/api/calibration-operations/"):
             bits = path.split("/")
             operation = service.store.operation(bits[3])
@@ -73,9 +79,7 @@ def handle(handler, method):
             token = body.get("upload_id", "")
             if not isinstance(token, str) or not token or Path(token).name != token or '/' in token or '\\' in token:
                 raise ValueError("شناسهٔ فایل نامعتبر است.")
-            source = (web.UPLOAD_DIR / token).resolve()
-            if not source.is_relative_to(web.UPLOAD_DIR.resolve()) or not source.is_file():
-                raise LookupError("فایل بارگذاری‌شده پیدا نشد.")
+            source = web.resolve_upload(handler._user_id(), token)
             handler._json(service.create(source, token.split('_', 1)[-1], body), 201)
             return True
         bits = path.split("/")

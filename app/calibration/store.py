@@ -20,15 +20,19 @@ class BudgetExceeded(ValueError):
 
 
 class Store:
-    def __init__(self, database):
+    def __init__(self, database, user_id: int = 1):
         self.database = database
+        # Phase 1: every calibration row belongs to one user. The DDL keeps
+        # ``user_id`` so a store created before the schema migration still
+        # gains the column, and every query below filters on it.
+        self.user_id = int(user_id or 1)
         with database.connect() as connection:
             connection.executescript('''
-                CREATE TABLE IF NOT EXISTS calibrations (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS calibration_cache (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS calibration_operations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, request_key TEXT NOT NULL, payload_hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(session_id,request_key));
-                CREATE TABLE IF NOT EXISTS calibration_budgets (id TEXT PRIMARY KEY, sample_spent INTEGER NOT NULL DEFAULT 0, full_spent INTEGER NOT NULL DEFAULT 0, sample_reserved INTEGER NOT NULL DEFAULT 0, full_reserved INTEGER NOT NULL DEFAULT 0, sample_calls INTEGER NOT NULL DEFAULT 0, cost_spent INTEGER NOT NULL DEFAULT 0, cost_reserved INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS calibration_attempts (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, phase TEXT NOT NULL, reserved INTEGER NOT NULL, cost_reserved INTEGER NOT NULL, status TEXT NOT NULL, usage TEXT, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS calibrations (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS calibration_cache (key TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS calibration_operations (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, session_id TEXT NOT NULL, request_key TEXT NOT NULL, payload_hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(session_id,request_key));
+                CREATE TABLE IF NOT EXISTS calibration_budgets (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, sample_spent INTEGER NOT NULL DEFAULT 0, full_spent INTEGER NOT NULL DEFAULT 0, sample_reserved INTEGER NOT NULL DEFAULT 0, full_reserved INTEGER NOT NULL DEFAULT 0, sample_calls INTEGER NOT NULL DEFAULT 0, cost_spent INTEGER NOT NULL DEFAULT 0, cost_reserved INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS calibration_attempts (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, budget_id TEXT NOT NULL, phase TEXT NOT NULL, reserved INTEGER NOT NULL, cost_reserved INTEGER NOT NULL, status TEXT NOT NULL, usage TEXT, created_at TEXT NOT NULL);
             ''')
 
     @contextmanager
@@ -46,18 +50,30 @@ class Store:
 
     def create(self, data):
         with self.transaction() as c:
-            c.execute("INSERT INTO calibrations VALUES (?,?,?)", (data["id"], data["revision"], json.dumps(data, ensure_ascii=False)))
-            c.execute("INSERT OR IGNORE INTO calibration_budgets(id) VALUES (?)", (data["budget_id"],))
+            c.execute(
+                "INSERT INTO calibrations(id,user_id,revision,data) VALUES (?,?,?,?)",
+                (data["id"], self.user_id, data["revision"], json.dumps(data, ensure_ascii=False)),
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO calibration_budgets(id,user_id) VALUES (?,?)",
+                (data["budget_id"], self.user_id),
+            )
 
     def get(self, identifier):
-        row = self.database.fetch_one("SELECT data FROM calibrations WHERE id=?", (identifier,))
+        row = self.database.fetch_one(
+            "SELECT data FROM calibrations WHERE id=? AND user_id=?",
+            (identifier, self.user_id),
+        )
         if not row:
             raise LookupError("جلسهٔ نمونه پیدا نشد.")
         return json.loads(row["data"])
 
     def change(self, identifier, action, revision=None):
         with self.transaction() as c:
-            row = c.execute("SELECT data FROM calibrations WHERE id=?", (identifier,)).fetchone()
+            row = c.execute(
+                "SELECT data FROM calibrations WHERE id=? AND user_id=?",
+                (identifier, self.user_id),
+            ).fetchone()
             if not row:
                 raise LookupError("جلسهٔ نمونه پیدا نشد.")
             data = json.loads(row["data"])
@@ -65,27 +81,45 @@ class Store:
                 raise Conflict("تنظیمات در صفحهٔ دیگری تغییر کرده؛ صفحه را تازه کنید.")
             action(data)
             data["updated_at"] = now()
-            c.execute("UPDATE calibrations SET revision=?,data=? WHERE id=?", (data["revision"], json.dumps(data, ensure_ascii=False), identifier))
+            c.execute(
+                "UPDATE calibrations SET revision=?,data=? WHERE id=? AND user_id=?",
+                (data["revision"], json.dumps(data, ensure_ascii=False), identifier, self.user_id),
+            )
         return data
 
     def list(self):
-        rows = self.database.fetch_all("SELECT data FROM calibrations ORDER BY rowid DESC LIMIT 30")
+        rows = self.database.fetch_all(
+            "SELECT data FROM calibrations WHERE user_id=? ORDER BY rowid DESC LIMIT 30",
+            (self.user_id,),
+        )
         return [json.loads(row["data"]) for row in rows]
 
     def cached(self, key):
-        row = self.database.fetch_one("SELECT data FROM calibration_cache WHERE key=?", (key,))
+        row = self.database.fetch_one(
+            "SELECT data FROM calibration_cache WHERE user_id=? AND key=?",
+            (self.user_id, f"{self.user_id}:{key}"),
+        )
         return json.loads(row["data"]) if row else None
 
     def cache(self, key, result):
-        self.database.execute("INSERT OR REPLACE INTO calibration_cache VALUES (?,?)", (key, json.dumps(result, ensure_ascii=False)))
+        self.database.execute(
+            "INSERT OR REPLACE INTO calibration_cache(key,user_id,data) VALUES (?,?,?)",
+            (f"{self.user_id}:{key}", self.user_id, json.dumps(result, ensure_ascii=False)),
+        )
 
     def budget(self, identifier):
-        return self.database.fetch_one("SELECT * FROM calibration_budgets WHERE id=?", (identifier,))
+        return self.database.fetch_one(
+            "SELECT * FROM calibration_budgets WHERE id=? AND user_id=?",
+            (identifier, self.user_id),
+        )
 
     def reserve(self, session, tokens, cost, phase):
         identifier = uuid.uuid4().hex
         with self.transaction() as c:
-            b = c.execute("SELECT * FROM calibration_budgets WHERE id=?", (session["budget_id"],)).fetchone()
+            b = c.execute(
+                "SELECT * FROM calibration_budgets WHERE id=? AND user_id=?",
+                (session["budget_id"], self.user_id),
+            ).fetchone()
             policy = session["budget"]
             if b["sample_spent"] + b["full_spent"] + b["sample_reserved"] + b["full_reserved"] + tokens > policy["total_tokens"]:
                 raise BudgetExceeded("سقف توکن کل کتاب کافی نیست. بودجه را بازبینی کنید.")
@@ -96,37 +130,42 @@ class Store:
                     raise BudgetExceeded("قیمت تأییدشدهٔ مدل در تنظیمات موجود نیست؛ سقف دلاری قابل اعمال نیست.")
                 if b["cost_spent"] + b["cost_reserved"] + cost > policy["max_cost_micros"]:
                     raise BudgetExceeded("سقف دلاری کتاب کافی نیست.")
-            c.execute(f"UPDATE calibration_budgets SET {phase}_reserved={phase}_reserved+?, cost_reserved=cost_reserved+?, sample_calls=sample_calls+? WHERE id=?", (tokens, cost or 0, int(phase == "sample"), session["budget_id"]))
-            c.execute("INSERT INTO calibration_attempts VALUES (?,?,?,?,?,?,?,?)", (identifier, session["budget_id"], phase, tokens, cost or 0, "dispatching", None, now()))
+            c.execute(f"UPDATE calibration_budgets SET {phase}_reserved={phase}_reserved+?, cost_reserved=cost_reserved+?, sample_calls=sample_calls+? WHERE id=? AND user_id=?", (tokens, cost or 0, int(phase == "sample"), session["budget_id"], self.user_id))
+            c.execute("INSERT INTO calibration_attempts(id,user_id,budget_id,phase,reserved,cost_reserved,status,usage,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (identifier, self.user_id, session["budget_id"], phase, tokens, cost or 0, "dispatching", None, now()))
         return identifier
 
     def settle(self, identifier, tokens, cost, usage):
         with self.transaction() as c:
-            a = c.execute("SELECT * FROM calibration_attempts WHERE id=?", (identifier,)).fetchone()
+            a = c.execute(
+                "SELECT * FROM calibration_attempts WHERE id=? AND user_id=?",
+                (identifier, self.user_id),
+            ).fetchone()
+            if a is None:
+                raise LookupError("عملیات پیدا نشد.")
             if a["status"] == "settled":
                 return
             phase = a["phase"]
-            c.execute(f"UPDATE calibration_budgets SET {phase}_reserved={phase}_reserved-?, {phase}_spent={phase}_spent+?, cost_reserved=cost_reserved-?, cost_spent=cost_spent+? WHERE id=?", (a["reserved"], tokens, a["cost_reserved"], cost if cost is not None else a["cost_reserved"], a["budget_id"]))
-            c.execute("UPDATE calibration_attempts SET status='settled',usage=? WHERE id=?", (json.dumps(usage), identifier))
+            c.execute(f"UPDATE calibration_budgets SET {phase}_reserved={phase}_reserved-?, {phase}_spent={phase}_spent+?, cost_reserved=cost_reserved-?, cost_spent=cost_spent+? WHERE id=? AND user_id=?", (a["reserved"], tokens, a["cost_reserved"], cost if cost is not None else a["cost_reserved"], a["budget_id"], self.user_id))
+            c.execute("UPDATE calibration_attempts SET status='settled',usage=? WHERE id=? AND user_id=?", (json.dumps(usage), identifier, self.user_id))
 
     def uncertain(self, identifier):
-        self.database.execute("UPDATE calibration_attempts SET status='uncertain' WHERE id=? AND status='dispatching'", (identifier,))
+        self.database.execute("UPDATE calibration_attempts SET status='uncertain' WHERE id=? AND user_id=? AND status='dispatching'", (identifier, self.user_id))
 
     def save_operation(self, operation, request_key, payload_hash):
         with self.transaction() as c:
-            row = c.execute("SELECT data,payload_hash FROM calibration_operations WHERE session_id=? AND request_key=?", (operation["session_id"], request_key)).fetchone()
+            row = c.execute("SELECT data,payload_hash FROM calibration_operations WHERE session_id=? AND request_key=? AND user_id=?", (operation["session_id"], request_key, self.user_id)).fetchone()
             if row:
                 if row["payload_hash"] != payload_hash:
                     raise Conflict("شناسهٔ درخواست تکراری با تنظیمات متفاوت ارسال شده است.")
                 return json.loads(row["data"]), False
-            c.execute("INSERT INTO calibration_operations VALUES (?,?,?,?,?)", (operation["id"], operation["session_id"], request_key, payload_hash, json.dumps(operation, ensure_ascii=False)))
+            c.execute("INSERT INTO calibration_operations(id,user_id,session_id,request_key,payload_hash,data) VALUES (?,?,?,?,?,?)", (operation["id"], self.user_id, operation["session_id"], request_key, payload_hash, json.dumps(operation, ensure_ascii=False)))
         return operation, True
 
     def operation(self, identifier):
-        row = self.database.fetch_one("SELECT data FROM calibration_operations WHERE id=?", (identifier,))
+        row = self.database.fetch_one("SELECT data FROM calibration_operations WHERE id=? AND user_id=?", (identifier, self.user_id))
         if not row:
             raise LookupError("عملیات پیدا نشد.")
         return json.loads(row["data"])
 
     def update_operation(self, operation):
-        self.database.execute("UPDATE calibration_operations SET data=? WHERE id=?", (json.dumps(operation, ensure_ascii=False), operation["id"]))
+        self.database.execute("UPDATE calibration_operations SET data=? WHERE id=? AND user_id=?", (json.dumps(operation, ensure_ascii=False), operation["id"], self.user_id))

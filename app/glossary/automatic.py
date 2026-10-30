@@ -110,8 +110,12 @@ def learn_chunk(client, paths, chunk_id, source, translated, model, stop_event=N
     print(f'Automatic glossary: {added} new terms from chunk {chunk_id}; {len(state["terms"])} learned in this job.')
 
 
-def sync_book(database, paths):
-    """Publish newly learned terms without replacing the user's equivalents."""
+def sync_book(database, paths, user_id: int = 1):
+    """Publish newly learned terms without replacing the user's equivalents.
+
+    ``user_id`` stamps the ``book_glossaries`` row (Phase 1). The book already
+    belongs to exactly one user, so this is the owner of the book being synced.
+    """
     with state_lock(paths):
         snapshot = load_snapshot(paths)
         if not snapshot.get('auto_extract') or not snapshot.get('book_id'):
@@ -122,11 +126,14 @@ def sync_book(database, paths):
             return
         book_id = snapshot['book_id']
         source, target = snapshot['source_language'], snapshot['target_language']
+        owner = int(user_id or 1)
         with database._lock, database.connect() as connection:
-            if not connection.execute('SELECT id FROM library_books WHERE id=?', (book_id,)).fetchone():
+            book = connection.execute('SELECT user_id FROM library_books WHERE id=?', (book_id,)).fetchone()
+            if not book:
                 return
-            connection.execute('INSERT OR IGNORE INTO book_glossaries(book_id,source_language,target_language) VALUES (?,?,?)', (book_id, source, target))
-            row = connection.execute('SELECT terms_json FROM book_glossaries WHERE book_id=? AND source_language=? AND target_language=?', (book_id, source, target)).fetchone()
+            owner = int(book['user_id'] or owner)
+            connection.execute('INSERT OR IGNORE INTO book_glossaries(user_id,book_id,source_language,target_language) VALUES (?,?,?,?)', (owner, book_id, source, target))
+            row = connection.execute('SELECT terms_json FROM book_glossaries WHERE book_id=? AND user_id=? AND source_language=? AND target_language=?', (book_id, owner, source, target)).fetchone()
             terms = json.loads(row['terms_json'])
             seen = {_key(term['source_term']) for term in terms}
             added = False
@@ -137,6 +144,6 @@ def sync_book(database, paths):
                     seen.add(key)
                     added = True
             if added:
-                connection.execute('UPDATE book_glossaries SET terms_json=?,version=version+1 WHERE book_id=? AND source_language=? AND target_language=?', (json.dumps(terms, ensure_ascii=False), book_id, source, target))
+                connection.execute('UPDATE book_glossaries SET terms_json=?,version=version+1 WHERE book_id=? AND user_id=? AND source_language=? AND target_language=?', (json.dumps(terms, ensure_ascii=False), book_id, owner, source, target))
         state['published_count'] = len(state['terms'])
         _atomic_json(Path(paths['job_dir']) / 'glossary_learned.json', state)

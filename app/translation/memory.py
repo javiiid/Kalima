@@ -30,18 +30,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def lookup(db: Any, source_text: str, from_lang: str, to_lang: str) -> str | None:
+def lookup(db: Any, source_text: str, from_lang: str, to_lang: str,
+           user_id: int = 1) -> str | None:
     """Return the stored translation for an exact match, else ``None``.
 
     A hit refreshes ``last_used_at`` so the memory UI (ORDER BY last_used_at)
     surfaces what the engine actually reuses. Never raises: a memory failure
     must degrade to a normal API call, never break the job.
+
+    Memory is per user (Phase 1): ``user_id`` scopes both the read and the
+    refresh so one account can never be served another account's translation.
     """
+    uid = int(user_id or 1)
     try:
         row = db.fetch_one(
             "SELECT translated_text FROM translation_memory"
-            " WHERE source_text=? AND source_language=? AND target_language=?",
-            (source_text, from_lang, to_lang),
+            " WHERE user_id=? AND source_text=? AND source_language=? AND target_language=?",
+            (uid, source_text, from_lang, to_lang),
         )
     except Exception:
         return None
@@ -50,8 +55,8 @@ def lookup(db: Any, source_text: str, from_lang: str, to_lang: str) -> str | Non
     try:
         db.execute(
             "UPDATE translation_memory SET last_used_at=?"
-            " WHERE source_text=? AND source_language=? AND target_language=?",
-            (_now(), source_text, from_lang, to_lang),
+            " WHERE user_id=? AND source_text=? AND source_language=? AND target_language=?",
+            (_now(), uid, source_text, from_lang, to_lang),
         )
     except Exception:
         pass
@@ -65,6 +70,7 @@ def store(
     from_lang: str,
     to_lang: str,
     source: str = "auto",
+    user_id: int = 1,
 ) -> None:
     """Remember one engine-produced pair. Upsert; never raises.
 
@@ -72,18 +78,23 @@ def store(
     the same pipeline that would translate them again) so they stay
     distinguishable from hand-entered (``manual``) and bulk (``import``)
     rows in the memory UI. Empty inputs are refused: they can never match.
+
+    ``user_id`` scopes the row (Phase 1) and matches the table's
+    ``UNIQUE(user_id, source_text, source_language, target_language)``, so the
+    upsert can never overwrite another account's pair.
     """
     if not source_text or not translated_text:
         return
+    uid = int(user_id or 1)
     try:
         db.execute(
-            "INSERT INTO translation_memory(source_text, translated_text,"
+            "INSERT INTO translation_memory(user_id, source_text, translated_text,"
             " source_language, target_language, source, confidence, last_used_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(source_text, source_language, target_language)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id, source_text, source_language, target_language)"
             " DO UPDATE SET translated_text=excluded.translated_text,"
             " confidence=excluded.confidence, last_used_at=excluded.last_used_at",
-            (source_text, translated_text, from_lang, to_lang, source, 1.0, _now()),
+            (uid, source_text, translated_text, from_lang, to_lang, source, 1.0, _now()),
         )
     except Exception:
         pass

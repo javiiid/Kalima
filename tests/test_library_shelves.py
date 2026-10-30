@@ -130,7 +130,8 @@ def test_library_summary_carries_shelf_tags_and_filters(tmp_path, monkeypatch):
     assert web_module.library_summary("shelf=finished", 1)["total"] == 0
     assert web_module.library_summary("tag=رمان", 1)["total"] == 1
     assert web_module.library_summary("tag=تاریخ", 1)["total"] == 0
-    # Other user sees the same book unshelved/untagged.
+    # Phase 1 scoping: another user sees none of this user's books at all --
+    # not just "unshelved", the book itself is invisible.
     other = web_module.library_summary("", 2)
-    assert other["items"][0]["shelf"] is None
-    assert other["items"][0]["tags"] == []
+    assert other["total"] == 0
+    assert other["items"] == []

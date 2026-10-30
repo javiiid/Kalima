@@ -182,7 +182,9 @@ class TestImportRescue:
         uploads, temp = sandbox
         result = web._import_rescue(_archive()[0], force=False)
         book = Path(result["file_path"])
-        assert book.parent == uploads
+        # Uploads are user-scoped from Phase 1: the book lands in the owner's
+        # sub-directory, not the shared uploads root.
+        assert book.parent == uploads / "1"
         assert book.name == "abc123_overthesevensea.epub"
         job_dir = temp / result["resumed_from"]
         assert job_dir.is_dir()

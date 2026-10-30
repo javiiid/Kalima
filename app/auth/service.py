@@ -346,6 +346,85 @@ def change_password(db, token: object, current_password: object, new_password: o
 
 
 # ============================================================
+# PASSWORD RESET
+# ============================================================
+
+PASSWORD_RESET_TTL_SECONDS = 900
+PASSWORD_RESET_MAX_ATTEMPTS = 5
+
+
+def request_password_reset(db, email: object, sender=None) -> dict:
+    """Issue a reset code without revealing whether the address exists.
+
+    The response shape is identical for known and unknown addresses. Codes
+    are stored hashed, expire quickly, and are single-use. Request throttling
+    reuses the durable auth-attempt log, so a restart does not reset an
+    attacker's budget.
+    """
+    address = normalize_email(email)
+    check_auth_throttle(db, "reset-request", address)
+    user = db.fetch_one("SELECT * FROM users WHERE email=?", (address,))
+    code = f"{secrets.randbelow(1000000):06d}"
+    send = sender or _otp_sender("smtp" if _smtp_configured() else "log")
+    if user is None:
+        # Burn equivalent work, but do not write a row for a non-account.
+        send(address, code)
+        return {"sent": True}
+    channel = send(address, code)
+    timestamp = _now()
+    db.execute(
+        "INSERT INTO password_resets(email, user_id, code_hash, expires_at, attempts, used, created_at)"
+        " VALUES (?, ?, ?, ?, 0, 0, ?)"
+        " ON CONFLICT(email) DO UPDATE SET user_id=excluded.user_id,"
+        " code_hash=excluded.code_hash, expires_at=excluded.expires_at,"
+        " attempts=0, used=0, created_at=excluded.created_at",
+        (
+            address,
+            user["id"],
+            _otp_hash(address, code),
+            (datetime.now(UTC) + timedelta(seconds=PASSWORD_RESET_TTL_SECONDS)).isoformat(),
+            timestamp,
+        ),
+    )
+    record_auth_event(db, user["id"], "password_reset_requested")
+    return {"sent": True, "channel": channel}
+
+
+def reset_password(db, email: object, code: object, new_password: object) -> dict:
+    """Consume a reset code, set a new password, and revoke every session."""
+    address = normalize_email(email)
+    check_auth_throttle(db, "reset", address)
+    row = db.fetch_one("SELECT * FROM password_resets WHERE email=?", (address,))
+    digest = _otp_hash(address, str(code or "").strip())
+    valid = (
+        row is not None
+        and not row.get("used")
+        and str(row.get("expires_at") or "") > _now()
+        and int(row.get("attempts") or 0) < PASSWORD_RESET_MAX_ATTEMPTS
+        and secrets.compare_digest(str(row.get("code_hash") or ""), digest)
+    )
+    if not valid:
+        record_auth_failure(db, "reset", address)
+        if row is not None:
+            attempts = int(row.get("attempts") or 0) + 1
+            db.execute(
+                "UPDATE password_resets SET attempts=?, used=? WHERE email=?",
+                (attempts, 1 if attempts >= PASSWORD_RESET_MAX_ATTEMPTS else 0, address),
+            )
+        raise LookupError("کد بازیابی درست نیست یا منقضی شده است.")
+    secret = validate_password(new_password)
+    timestamp = _now()
+    db.execute(
+        "UPDATE users SET password_hash=?, updated_at=? WHERE id=?",
+        (hash_password(secret), timestamp, row["user_id"]),
+    )
+    db.execute("UPDATE password_resets SET used=1 WHERE email=?", (address,))
+    db.execute("DELETE FROM auth_sessions WHERE user_id=?", (row["user_id"],))
+    record_auth_event(db, row["user_id"], "password_reset")
+    return user_public(db.fetch_one("SELECT * FROM users WHERE id=?", (row["user_id"],)))
+
+
+# ============================================================
 # LOGIN/LOGOUT AUDIT TRAIL
 # ============================================================
 #

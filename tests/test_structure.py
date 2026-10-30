@@ -36,6 +36,14 @@ from app.output.structure import CLASS_EMPHASIS
 
 BOOK = Path(r"D:\J_BookTranslate_V\data\uploads\overthesevensea_ch1-3_test.epub")
 
+# The book is a real (large) EPUB kept under data/, which is gitignored, so a
+# clean checkout never has it. Skip rather than fail so the suite is green
+# everywhere the fixture is genuinely unavailable.
+pytestmark = pytest.mark.skipif(
+    not BOOK.is_file(),
+    reason=f"local fixture {BOOK.name} is not present (data/ is gitignored)",
+)
+
 
 class TestTheTable:
     def test_it_covers_the_classes_a_real_book_uses(self):

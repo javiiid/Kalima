@@ -5,7 +5,9 @@ import io
 import hashlib
 import json
 import mimetypes
+import os
 import re
+import secrets
 import shutil
 import threading
 import traceback
@@ -67,6 +69,7 @@ from app.account.service import (
     start_checkout,
     update_account,
 )
+from app.account import billing as account_billing
 from app.library.view import library_page
 from app.library import covers as book_covers
 from app.library import shelves as book_shelves
@@ -84,6 +87,8 @@ from app.auth.service import (
     revoke_all_sessions as auth_revoke_all_sessions,
     request_email_code as auth_request_email_code,
     verify_email_code as auth_verify_email_code,
+    request_password_reset as auth_request_password_reset,
+    reset_password as auth_reset_password,
 )
 from app.glossary.proposal import (
     _key as _glossary_key,
@@ -117,6 +122,104 @@ COVERS_DIR = ensure_dir("data") / "covers"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 WEB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 JOB_META_DIR.mkdir(parents=True, exist_ok=True)
+CSRF_COOKIE = "kalima_csrf"
+CSRF_HEADER = "X-CSRF-Token"
+DEFAULT_QUOTA_BYTES = 5 * 1024 * 1024 * 1024
+
+
+def user_upload_dir(user_id: int) -> Path:
+    directory = UPLOAD_DIR / str(int(user_id))
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def user_output_dir(user_id: int) -> Path:
+    directory = WEB_OUTPUT_DIR / str(int(user_id))
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def user_covers_dir(user_id: int) -> Path:
+    directory = COVERS_DIR / str(int(user_id))
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def storage_quota_bytes() -> int:
+    try:
+        value = int(os.environ.get("KALIMA_USER_QUOTA_BYTES", DEFAULT_QUOTA_BYTES))
+    except (TypeError, ValueError):
+        value = DEFAULT_QUOTA_BYTES
+    return max(1, value)
+
+
+def user_storage_used(user_id: int) -> int:
+    row = db.fetch_one(
+        "SELECT COALESCE(SUM(size_bytes),0) AS total FROM files WHERE user_id=?",
+        (int(user_id),),
+    ) or {"total": 0}
+    used = int(row.get("total") or 0)
+    # Estimate-only uploads have no files row yet; count their bytes too so a
+    # client cannot bypass the quota by never pressing "start".
+    try:
+        directory = UPLOAD_DIR / str(int(user_id))
+        if directory.is_dir():
+            used = max(used, sum(path.stat().st_size for path in directory.rglob("*") if path.is_file()))
+    except OSError:
+        pass
+    return used
+
+
+def check_user_quota(user_id: int, incoming_bytes: int) -> None:
+    if user_storage_used(user_id) + max(0, int(incoming_bytes)) > storage_quota_bytes():
+        raise ValueError("سهمیهٔ فضای این حساب پر شده است.")
+
+
+def secure_cookies() -> bool:
+    flag = (os.environ.get("KALIMA_SECURE_COOKIES") or "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    return (os.environ.get("KALIMA_ENV") or "").strip().lower() in {"prod", "production"}
+
+
+def configured_hosts() -> set[str]:
+    hosts = set(ALLOWED_HOSTS)
+    for raw in (os.environ.get("KALIMA_ALLOWED_HOSTS") or "").split(","):
+        value = raw.strip().lower()
+        if value:
+            hosts.add(value)
+    bind_host = (os.environ.get("KALIMA_HOST") or "").strip().lower()
+    bind_port = (os.environ.get("KALIMA_PORT") or "8765").strip()
+    if bind_host and bind_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        hosts.add(bind_host)
+        hosts.add(f"{bind_host}:{bind_port}")
+    return hosts
+
+
+def configured_origins() -> set[str]:
+    origins = set(ALLOWED_ORIGINS)
+    for raw in (os.environ.get("KALIMA_CORS_ORIGINS") or "").split(","):
+        value = raw.strip().rstrip("/")
+        if value:
+            origins.add(value)
+    return origins
+
+
+def _safe_upload_name(token: str) -> str:
+    name = Path(str(token or "")).name
+    if not name or name != str(token or "") or "/" in str(token or "") or "\\" in str(token or ""):
+        raise ValueError("شناسهٔ آپلود نامعتبر است.")
+    return name
+
+
+def resolve_upload(user_id: int, token: str) -> Path:
+    """Resolve an upload token inside this user's directory only."""
+    name = _safe_upload_name(token)
+    target = (UPLOAD_DIR / str(int(user_id)) / name).resolve()
+    root = (UPLOAD_DIR / str(int(user_id))).resolve()
+    if root not in target.parents or not target.is_file():
+        raise LookupError("فایل آپلودشده پیدا نشد.")
+    return target
 
 
 def now() -> str:
@@ -152,6 +255,8 @@ class Job:
     qa_report: str | None = None
     quality: dict | None = None
     style: str = "literary"
+    user_id: int = 1
+    estimated_cost: float = 0.0
 
 
 JOBS: dict[str, Job] = {}
@@ -165,7 +270,8 @@ def _persist_job(job: Job) -> None:
     """Persist web-job metadata so a server restart can recover it."""
     JOB_META_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
-        "id": job.id, "filename": job.filename, "input_path": str(job.input_path),
+        "id": job.id, "user_id": job.user_id,
+        "filename": job.filename, "input_path": str(job.input_path),
         "filetype": job.filetype, "file_size": job.file_size, "options": job.options,
         "source_language": job.source_language, "target_language": job.target_language,
         "model": job.model, "mode": job.mode, "status": job.status,
@@ -176,6 +282,7 @@ def _persist_job(job: Job) -> None:
         "assets": dict(job.assets or {}), "qa_report": job.qa_report,
         "quality": job.quality,
         "style": job.style,
+        "estimated_cost": job.estimated_cost,
     }
     target = JOB_META_DIR / f"{job.id}.json"
     temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
@@ -205,7 +312,7 @@ def _job_event(job: Job, event: str, message: str, level: str = "INFO") -> None:
 
 def _rescue_job(job: Job) -> Path:
     """Create a portable snapshot of all currently recoverable job state."""
-    rescue_path = WEB_OUTPUT_DIR / f"{job.id}_rescue.zip"
+    rescue_path = user_output_dir(job.user_id) / f"{job.id}_rescue.zip"
     candidates = [JOB_META_DIR / f"{job.id}.json", job.input_path]
     if job.output_path:
         candidates.append(job.output_path)
@@ -251,7 +358,10 @@ def _rescue_job(job: Job) -> Path:
 
 
 def _library_book_for_job(job: Job) -> int | None:
-    row = db.fetch_one("SELECT book_id FROM files WHERE job_id=? ORDER BY id LIMIT 1", (job.id,))
+    row = db.fetch_one(
+        "SELECT book_id FROM files WHERE job_id=? AND user_id=? ORDER BY id LIMIT 1",
+        (job.id, int(job.user_id)),
+    )
     return int(row["book_id"]) if row and row.get("book_id") else None
 
 
@@ -261,23 +371,31 @@ def _ensure_library_source(job: Job) -> int:
         return existing
     timestamp = now()
     title = Path(job.filename).stem.replace("_", " ").strip() or job.filename
-    book_id = db.execute("INSERT INTO library_books(title, created_at, updated_at) VALUES (?, ?, ?)", (title, timestamp, timestamp))
-    db.execute("INSERT INTO files(job_id, book_id, path, kind, display_name, extension, mime_type, language, size_bytes, is_readable, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (job.id, book_id, str(job.input_path), "original", job.filename, job.filetype, mimetypes.guess_type(job.filename)[0] or "application/octet-stream", job.source_language, job.file_size, int(job.filetype == "epub"), timestamp))
-    _store_book_cover(int(book_id), job.input_path)
+    book_id = db.execute(
+        "INSERT INTO library_books(user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (int(job.user_id), title, timestamp, timestamp),
+    )
+    db.execute("INSERT INTO files(user_id, job_id, book_id, path, kind, display_name, extension, mime_type, language, size_bytes, is_readable, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (int(job.user_id), job.id, book_id, str(job.input_path), "original", job.filename, job.filetype, mimetypes.guess_type(job.filename)[0] or "application/octet-stream", job.source_language, job.file_size, int(job.filetype == "epub"), timestamp))
+    _store_book_cover(int(book_id), job.input_path, int(job.user_id))
     return int(book_id)
 
 
-def _store_book_cover(book_id: int, source: Path) -> str | None:
+def _store_book_cover(book_id: int, source: Path, user_id: int = 1) -> str | None:
     """Extract a cover for a book and record its URL. Best-effort by design."""
     try:
-        cover_file = book_covers.extract_cover(Path(source), COVERS_DIR / str(int(book_id)))
+        cover_file = book_covers.extract_cover(
+            Path(source), user_covers_dir(user_id) / str(int(book_id))
+        )
     except Exception:
         return None
     if cover_file is None:
         return None
     url = book_covers.cover_url(book_id, cover_file.suffix)
     try:
-        db.execute("UPDATE library_books SET cover_path=?, updated_at=? WHERE id=?", (url, now(), int(book_id)))
+        db.execute(
+            "UPDATE library_books SET cover_path=?, updated_at=? WHERE id=? AND user_id=?",
+            (url, now(), int(book_id), int(user_id)),
+        )
     except Exception:
         return None
     return url
@@ -292,8 +410,11 @@ def _register_library_output(job: Job) -> None:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     timestamp = now()
-    db.execute("UPDATE library_books SET updated_at=? WHERE id=?", (timestamp, book_id))
-    db.execute("INSERT INTO files(job_id, book_id, path, kind, display_name, extension, mime_type, language, size_bytes, checksum, is_readable, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM files WHERE job_id=? AND kind=?)", (job.id, book_id, str(job.output_path), "translated", job.output_path.name, job.filetype, mimetypes.guess_type(job.output_path.name)[0] or "application/octet-stream", job.target_language, job.output_path.stat().st_size, digest.hexdigest(), int(job.filetype == "epub"), timestamp, job.id, "translated"))
+    db.execute(
+        "UPDATE library_books SET updated_at=? WHERE id=? AND user_id=?",
+        (timestamp, book_id, int(job.user_id)),
+    )
+    db.execute("INSERT INTO files(user_id, job_id, book_id, path, kind, display_name, extension, mime_type, language, size_bytes, checksum, is_readable, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM files WHERE job_id=? AND kind=? AND user_id=?)", (int(job.user_id), job.id, book_id, str(job.output_path), "translated", job.output_path.name, job.filetype, mimetypes.guess_type(job.output_path.name)[0] or "application/octet-stream", job.target_language, job.output_path.stat().st_size, digest.hexdigest(), int(job.filetype == "epub"), timestamp, job.id, "translated", int(job.user_id)))
 
 
 def restore_jobs() -> None:
@@ -314,6 +435,8 @@ def restore_jobs() -> None:
                 data.get("progress", {"completed": 0, "total": 0}),
                 assets=data.get("assets") or {}, qa_report=data.get("qa_report"),
                 quality=data.get("quality"), style=data.get("style", "literary"))
+            job.user_id = int(data.get("user_id") or 1)
+            job.estimated_cost = float(data.get("estimated_cost") or 0.0)
             was_active = job.status in {"queued", "running"}
             if was_active:
                 job.status = "paused" if job.pipeline_job_id else "failed"
@@ -387,7 +510,7 @@ def _update_progress(job: Job) -> None:
     if not job.paths:
         return
     try:
-        sync_book(db, job.paths)
+        sync_book(db, job.paths, int(job.user_id))
     except Exception:
         pass
     try:
@@ -429,7 +552,7 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
             _job_event(job, "resumed" if resume else "started", "ترجمه از آخرین نقطهٔ سالم ادامه یافت." if resume else "ترجمه شروع شد.")
             client = OpenAI(**get_openai_config())
             output_name = f"{job.input_path.stem}_{job.options['to_lang'].lower()}_{job.options['model']}.{job.filetype}"
-            job.output_path = WEB_OUTPUT_DIR / f"{job.id}_{output_name}"
+            job.output_path = user_output_dir(job.user_id) / f"{job.id}_{output_name}"
             prompt = job.options["prompt"] or get_default_prompt(job.options["from_lang"], job.options["to_lang"], job.filetype)
             if job.options.get("preserve_voice", "true") == "true":
                 prompt = with_author_voice(prompt)
@@ -438,7 +561,7 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
             if job.options.get("calibration_id"):
                 from app.calibration.routes import get_service
                 from app.calibration.runner import run_calibrated_job
-                manifest = run_calibrated_job(get_service(), job,
+                manifest = run_calibrated_job(get_service(int(job.user_id)), job,
                     lambda pipeline_id, paths: _on_pipeline_started(job, pipeline_id, paths),
                     lambda: _update_progress(job))
             else:
@@ -448,6 +571,7 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
                     output_formats=job.options.get("outputs"), translation_prompt=prompt, stop_event=job.stop_event,
                     style_preset=job.style,
                     fallback_model=job.options.get("fallback_model"),
+                    user_id=int(job.user_id),
                     on_job_started=lambda pipeline_id, paths: _on_pipeline_started(job, pipeline_id, paths))
             _update_progress(job)
             job.status = "cancelled" if job.cancel_requested else ("paused" if job.stop_event.is_set() else ("completed" if job.output_path.exists() else "failed"))
@@ -474,7 +598,7 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
             if job.options.get("calibration_id"):
                 from app.calibration.routes import get_service
                 state = {"completed": "COMPLETED", "cancelled": "CANCELLED", "paused": "PAUSED", "failed": "FAILED"}.get(job.status, "FULL_PROCESSING")
-                get_service().store.change(job.options["calibration_id"], lambda s: s.update(state=state))
+                get_service(int(job.user_id)).store.change(job.options["calibration_id"], lambda s: s.update(state=state))
 
 
 _CHUNK_FLAG_MARKERS = ("{NOTE", "{BOUNDARY_WARNING", "{WARNING")
@@ -520,15 +644,16 @@ def _job_chunks_payload(job: Job | None) -> dict:
     return {"items": items, "total": len(items), "available": True, "translated": len(translations)}
 
 
-def _book_source_chunks(book_id: int) -> tuple[list, dict]:
-    """Locate the newest chunk/translation state for a book.
+def _book_source_chunks(book_id: int, user_id: int = 1) -> tuple[list, dict]:
+    """Locate the newest chunk/translation state for a user's book.
 
     The proposal samples the same durable files the pipeline reads, so it sees
     exactly the text a translation would. Falls back to any job that holds
     paths for the book.
     """
     with JOBS_LOCK:
-        candidates = [job for job in JOBS.values() if job.paths]
+        candidates = [job for job in JOBS.values()
+                      if job.paths and int(job.user_id) == int(user_id)]
     for job in candidates:
         if _library_book_for_job(job) != book_id:
             continue
@@ -550,7 +675,7 @@ def _book_source_chunks(book_id: int) -> tuple[list, dict]:
     return [], {}
 
 
-def _generate_proposal(book_id: int, body: dict) -> dict:
+def _generate_proposal(book_id: int, body: dict, user_id: int = 1) -> dict:
     """Build a draft glossary from samples across the book. One LLM call."""
     source = str(body.get("from_lang", "EN"))
     target = str(body.get("to_lang", "FA"))
@@ -561,7 +686,10 @@ def _generate_proposal(book_id: int, body: dict) -> dict:
     if not model:
         raise ValueError("مدل نامعتبر است.")
 
-    chunks, translations = _book_source_chunks(book_id)
+    # Pre-dispatch ledger guard: one paid LLM call leaves from here.
+    account_billing.check_credit(int(user_id or 1), 1)
+
+    chunks, translations = _book_source_chunks(book_id, user_id)
     if not chunks:
         raise LookupError(
             "برای این کتاب هنوز بخشی ساخته نشده. اول یک‌بار ترجمه را شروع و متوقف کنید "
@@ -679,10 +807,10 @@ def _job_payload(job: Job) -> dict:
     return result
 
 
-def dashboard_summary() -> dict:
+def dashboard_summary(user_id: int = 1) -> dict:
     """Return the lightweight aggregate used by the future dashboard sidebar."""
     with JOBS_LOCK:
-        jobs = list(JOBS.values())
+        jobs = [job for job in JOBS.values() if int(job.user_id) == int(user_id)]
     counts = {
         "active_jobs": sum(job.status in {"queued", "running"} for job in jobs),
         "paused_jobs": sum(job.status == "paused" for job in jobs),
@@ -717,14 +845,32 @@ READING_DEFAULTS = {
 }
 
 
-def reading_settings() -> dict:
+def reading_settings(user_id: int | None = None) -> dict:
+    uid = int(user_id if user_id is not None else book_shelves.resolve_user_id(db))
     values = dict(READING_DEFAULTS)
-    for row in db.fetch_all("SELECT key, value_json FROM settings WHERE key LIKE 'reading_%' OR key='study_night_mode'"):
+    prefix = "" if uid == int(book_shelves.resolve_user_id(db)) else f"u{uid}:"
+    if prefix:
+        rows = db.fetch_all(
+            "SELECT key, value_json FROM settings WHERE key LIKE ? OR key=?",
+            (prefix + "reading_%", prefix + "study_night_mode"),
+        )
+    else:
+        rows = db.fetch_all(
+            "SELECT key, value_json FROM settings WHERE (key LIKE 'reading_%' OR key='study_night_mode')"
+            " AND key NOT LIKE 'u%:%'"
+        )
+    for row in rows:
+        key = row["key"][len(prefix):] if prefix else row["key"]
         try:
-            values[row["key"]] = json.loads(row["value_json"])
+            values[key] = json.loads(row["value_json"])
         except (TypeError, json.JSONDecodeError):
             continue
     return values
+
+
+def reading_setting_key(user_id: int, key: str) -> str:
+    uid = int(user_id)
+    return key if uid == int(book_shelves.resolve_user_id(db)) else f"u{uid}:{key}"
 
 
 def _library_user_id(token: str = "") -> int:
@@ -755,7 +901,7 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
     uid = user_id if user_id is not None else book_shelves.resolve_user_id(db)
     archived_mode = status_filter == "archived"
     archived_flag = 1 if archived_mode else 0
-    books = db.fetch_all(f"SELECT * FROM library_books WHERE archived={archived_flag} ORDER BY updated_at DESC")
+    books = db.fetch_all(f"SELECT * FROM library_books WHERE user_id=? AND archived={archived_flag} ORDER BY updated_at DESC", (uid,))
     # Batch the per-book reads into one query per table. Database opens a
     # fresh SQLite connection per fetch (~0.9ms with WAL + RLock), so the old
     # per-book queries cost ~2.2s at 800+ books; batched they cost ~1ms with
@@ -765,7 +911,7 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
     for row in db.fetch_all("SELECT book_id, tag FROM book_tags WHERE user_id=? ORDER BY book_id, tag", (uid,)):
         tags_by_book.setdefault(row["book_id"], []).append(row["tag"])
     files_by_book: dict[int, list[dict]] = {}
-    for row in db.fetch_all(f"SELECT * FROM files WHERE archived={archived_flag} ORDER BY book_id, CASE kind WHEN 'translated' THEN 0 ELSE 1 END, id"):
+    for row in db.fetch_all(f"SELECT * FROM files WHERE user_id=? AND archived={archived_flag} ORDER BY book_id, CASE kind WHEN 'translated' THEN 0 ELSE 1 END, id", (uid,)):
         files_by_book.setdefault(row["book_id"], []).append(row)
     items = []
     for book in books:
@@ -783,7 +929,7 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
         for file in files:
             if type_filter and file.get("extension", "").lower() != type_filter.lstrip("."):
                 continue
-            job = db.fetch_one("SELECT status, progress_completed, progress_total, source_language, target_language, model, error FROM jobs WHERE id=?", (file.get("job_id"),)) if file.get("job_id") else None
+            job = db.fetch_one("SELECT status, progress_completed, progress_total, source_language, target_language, model, error FROM jobs WHERE id=? AND user_id=?", (file.get("job_id"), uid)) if file.get("job_id") else None
             status = (job or {}).get("status") or ("completed" if file["kind"] in {"original", "translated"} else "unknown")
             statuses.append(status)
             variant = {**file, "status": status, "progress": {"completed": (job or {}).get("progress_completed", 0), "total": (job or {}).get("progress_total", 0)}, "error": (job or {}).get("error")}
@@ -792,6 +938,8 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
                 if file.get("extension", "").lower() == "epub":
                     variant["reader"] = f"/reader/{file['job_id']}"
                 job_object = JOBS.get(file["job_id"])
+                if job_object is not None and int(job_object.user_id) != int(uid):
+                    job_object = None
                 assets = dict((job_object.assets or {}) if job_object else {})
                 if assets:
                     versions = [{"name": "main", "download": f"/downloads/{file['job_id']}"}]
@@ -809,7 +957,7 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
             # per listing at most; a miss simply keeps the initials tile.
             original = next((v for v in variants if v.get("kind") == "original" and Path(str(v.get("path", ""))).is_file()), None)
             if original is not None:
-                cover_path = _store_book_cover(int(book["id"]), Path(str(original["path"])))
+                cover_path = _store_book_cover(int(book["id"]), Path(str(original["path"])), uid)
         items.append({"id": book["id"], "title": book["title"], "author": book.get("author", ""), "cover_path": cover_path, "created_at": book["created_at"], "updated_at": book["updated_at"], "status": overall, "shelf": shelf, "tags": tags, "variants": variants, "size_bytes": sum(int(item.get("size_bytes", 0)) for item in variants), "translated": any(item["kind"] == "translated" for item in variants), "readable": any(item.get("reader") for item in variants)})
     total = len(items)
     try: page, limit = max(1, int(params.get("page", [1])[0])), max(1, min(100, int(params.get("limit", [24])[0])))
@@ -931,7 +1079,7 @@ def _loopback_authority(value: str) -> bool:
 
 def _origin_permitted(origin: str) -> bool:
     origin = origin.strip().rstrip("/")
-    if origin in ALLOWED_ORIGINS:
+    if origin in configured_origins():
         return True
     return origin.startswith(("http://", "https://")) and _loopback_authority(
         origin.split("://", 1)[1]
@@ -942,13 +1090,17 @@ def _origin_permitted(origin: str) -> bool:
 # Upload
 # ============================================================
 
-def _parse_upload(handler):
+def _parse_upload(handler, *, required: bool = True):
     """Read one multipart file upload off the request.
 
     Lifted out of the ``POST /api/jobs`` handler so the upload-only route and the
     start-a-translation route cannot drift apart. The two used to be one block of
     code; splitting them into separate implementations is how a file ends up
     accepted by one and rejected by the other.
+
+    With ``required=False`` a fields-only body is accepted; ``POST /api/jobs``
+    uses that to consume the token returned by ``/api/jobs/upload`` instead of
+    receiving the book bytes a second time.
 
     Returns ``(fields, filename, payload)``. Raises ``ValueError`` for anything
     the caller should answer with a 400.
@@ -983,29 +1135,31 @@ def _parse_upload(handler):
             value = payload.decode("utf-8", errors="replace")
             fields[name] = fields[name] + "," + value if name in fields else value
 
-    if not upload_name or not upload_data:
+    if required and (not upload_name or not upload_data):
         raise ValueError("No file in the upload.")
-    return fields, _safe_filename(upload_name), upload_data
+    return fields, _safe_filename(upload_name) if upload_name else "", upload_data
 
 
-def _store_upload(filename: str, payload: bytes) -> Path:
-    """Write an upload into the upload directory under a safe, unique name.
-
-    Returns the path. Raises ``ValueError`` for a type we do not accept and
-    ``OSError`` when the disk is short of room -- the same two failures the
-    original handler reported, kept distinct so the messages stay accurate.
-    """
+def _store_upload(filename: str, payload: bytes, user_id: int = 1) -> Path:
+    """Write an upload into this user's directory under a safe, unique name."""
     suffix = Path(filename).suffix.lower()
     if suffix not in {".epub", ".pdf", ".txt"}:
         raise ValueError("Only EPUB, PDF and TXT files are accepted.")
+    check_user_quota(user_id, len(payload))
     job_id = uuid.uuid4().hex[:12]
-    target = UPLOAD_DIR / f"{job_id}_{filename}"
-    ensure_disk_space(UPLOAD_DIR, required_bytes=len(payload) * 3)
+    target = user_upload_dir(user_id) / f"{job_id}_{filename}"
+    ensure_disk_space(target.parent, required_bytes=len(payload) * 3)
     target.write_bytes(payload)
     return target
 
 
-def _import_rescue(payload: bytes, *, force: bool) -> dict:
+def _charge_job_start(user_id: int, reference: str, estimated_cost: float = 0.0) -> dict:
+    credits = max(1, account_billing.credits_for_usd(estimated_cost))
+    return account_billing.charge(user_id, credits, "translation", reference,
+                                  amount_usd=estimated_cost, require_positive=True)
+
+
+def _import_rescue(payload: bytes, *, force: bool, user_id: int = 1) -> dict:
     """Unpack a rescue archive and put the book back in a resumable state.
 
     Returns a descriptor for the client. Raises ``ValueError`` when the archive
@@ -1038,12 +1192,15 @@ def _import_rescue(payload: bytes, *, force: bool) -> dict:
 
     with JOBS_LOCK:
         existing = JOBS.get(imported.job_id)
+    if existing is not None and int(existing.user_id) != int(user_id):
+        raise ValueError("این شناسهٔ کار روی سرور قابل استفاده نیست.")
     if existing is not None and not force:
         raise _RescueConflict(imported, existing)
 
     # The book goes to its real location first, because the chunking check below
     # has to read it. Nothing else is written until the check passes.
-    uploads = UPLOAD_DIR
+    check_user_quota(user_id, len(imported.book_bytes))
+    uploads = user_upload_dir(user_id)
     uploads.mkdir(parents=True, exist_ok=True)
     book_path = uploads / f"{imported.job_id}_{imported.filename}"
     book_path.write_bytes(imported.book_bytes)
@@ -1086,6 +1243,7 @@ def _import_rescue(payload: bytes, *, force: bool) -> dict:
         imported.model,
         imported.mode,
         style=imported.style,
+        user_id=int(user_id),
     )
     # The pipeline reads this to find the directory it resumes from.
     job.pipeline_job_id = imported.pipeline_job_id
@@ -1151,6 +1309,67 @@ class _RescueConflict(ValueError):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None: return
 
+    def end_headers(self) -> None:
+        """Attach the per-request security headers exactly once."""
+        origin = (self.headers.get("Origin") or "").strip().rstrip("/")
+        if origin and _origin_permitted(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
+        cookie = getattr(self, "_csrf_set_cookie", None)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        super().end_headers()
+
+    def _ensure_csrf(self) -> str:
+        """Read or mint the double-submit token carried by the CSRF cookie."""
+        cached = getattr(self, "_csrf_token", "")
+        if cached:
+            return cached
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie") or "").get(CSRF_COOKIE)
+        except Exception:
+            morsel = None
+        token = morsel.value if morsel and len(morsel.value) >= 20 else ""
+        if not token:
+            token = secrets.token_urlsafe(32)
+            secure = "; Secure" if secure_cookies() else ""
+            self._csrf_set_cookie = (
+                f"{CSRF_COOKIE}={token}; Path=/; SameSite=Lax; Max-Age={SESSION_DAYS * 86400}{secure}"
+            )
+        self._csrf_token = token
+        return token
+
+    def _csrf_valid(self) -> bool:
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie") or "").get(CSRF_COOKIE)
+        except Exception:
+            return False
+        cookie = morsel.value if morsel else ""
+        header = self.headers.get(CSRF_HEADER) or ""
+        return bool(cookie and header) and secrets.compare_digest(str(cookie), str(header))
+
+    def _cookie_authenticated(self) -> bool:
+        """True when the request carries a session cookie (cookie auth)."""
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie") or "").get(SESSION_COOKIE)
+        except Exception:
+            return False
+        return bool(morsel and morsel.value)
+
+    def send_error(self, code, message=None, explain=None):
+        """Refuse to leak a traceback when the client has already gone.
+
+        ``BaseHTTPRequestHandler.send_error`` writes the body straight to the
+        socket, so an aborted reader (a closed cover/download request) turns a
+        routine 404 into a printed exception. Every caller in this handler uses
+        ``send_error`` for a benign "not found"; swallow the client-gone class.
+        """
+        try:
+            super().send_error(code, message, explain)
+        except _CLIENT_GONE:
+            pass
+
     def _reject(self, reason: str) -> None:
         """Refuse a request that a local page should never have issued."""
         try:
@@ -1161,13 +1380,14 @@ class Handler(BaseHTTPRequestHandler):
     def _host_allowed(self) -> bool:
         """Block DNS rebinding.
 
-        If an attacker's domain resolves to 127.0.0.1, the browser treats the
-        response as same-origin to *their* page and will happily hand over the
-        body. That leaks job filenames and provider configuration, so the Host
-        header is checked on every method, including plain GET.
+        Loopback authorities stay allowed for the local build and the Vite
+        proxy. A hosted deployment adds its real host through
+        ``KALIMA_ALLOWED_HOSTS`` / ``KALIMA_HOST``; anything else is refused.
         """
         host = (self.headers.get("Host") or "").strip().lower()
-        return not host or _loopback_authority(host)
+        if not host:
+            return True
+        return _loopback_authority(host) or host in configured_hosts()
 
     def _origin_allowed(self) -> bool:
         """Reject cross-origin writes.
@@ -1199,10 +1419,19 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _guarded(self) -> bool:
-        if self._origin_allowed():
-            return True
-        self._reject("این درخواست از مبدأ مجاز ارسال نشده است.")
-        return False
+        if not self._origin_allowed():
+            self._reject("این درخواست از مبدأ مجاز ارسال نشده است.")
+            return False
+        # CSRF double-submit protects cookie authentication. A request that
+        # carries no session cookie is not riding the user's browser session
+        # (anonymous local fallback, or a Bearer-authorized API client), so a
+        # missing token cannot be a cross-site forgery and must not be refused.
+        # The Origin/Sec-Fetch-Site check above still blocks cross-site writes.
+        if (self.command in MUTATING_METHODS and self._cookie_authenticated()
+                and not self._csrf_valid()):
+            self._reject("توکن محافظت CSRF نامعتبر است؛ صفحه را تازه کنید.")
+            return False
+        return True
 
     def _json(self, payload: dict, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1242,11 +1471,39 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return ""
     def _set_session_cookie(self, token: str) -> dict[str, str]:
-        return {"Set-Cookie": f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DAYS * 86400}"}
+        secure = "; Secure" if secure_cookies() else ""
+        return {"Set-Cookie": f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DAYS * 86400}{secure}"}
     def _clear_session_cookie(self) -> dict[str, str]:
-        return {"Set-Cookie": f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"}
+        secure = "; Secure" if secure_cookies() else ""
+        return {"Set-Cookie": f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"}
+    def _user_id(self) -> int:
+        cached = getattr(self, "_cached_user_id", None)
+        if cached is not None:
+            return int(cached)
+        user = None
+        try:
+            user = user_from_token(db, self._session_token())
+        except Exception:
+            user = None
+        uid = int(user["id"]) if user else int(book_shelves.resolve_user_id(db))
+        self._cached_user_id = uid
+        return uid
+    def _owned_book(self, book_id: object) -> dict | None:
+        try:
+            return db.fetch_one(
+                "SELECT * FROM library_books WHERE id=? AND user_id=?",
+                (int(book_id), self._user_id()),
+            )
+        except (TypeError, ValueError):
+            return None
+    def _is_admin(self) -> bool:
+        return self._user_id() == int(book_shelves.resolve_user_id(db))
     def _job(self, job_id: str) -> Job | None:
-        with JOBS_LOCK: return JOBS.get(job_id)
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+        if job is not None and int(job.user_id) != self._user_id():
+            return None
+        return job
     def _request_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
         if length > 2 * 1024 * 1024:
@@ -1255,17 +1512,34 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("JSON body must be an object.")
         return payload
+
+    def do_OPTIONS(self) -> None:
+        if not self._host_allowed():
+            self._reject("این درخواست از مبدأ مجاز ارسال نشده است."); return
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and not _origin_permitted(origin):
+            self._reject("این درخواست از مبدأ مجاز ارسال نشده است."); return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
+
     def do_GET(self) -> None:
         if not self._host_allowed():
             self._reject("این درخواست از مبدأ مجاز ارسال نشده است."); return
+        self._ensure_csrf()
         parsed = urlparse(self.path)
         if calibration_route(self, "GET"): return
         if parsed.path.startswith('/api/library/') and '/glossary/proposal' in parsed.path:
             query = parse_qs(parsed.query)
             origin = (query.get('origin', ['preflight'])[0] or 'preflight').lower()
+            book_id = int(parsed.path.split('/')[3])
+            if not self._owned_book(book_id):
+                self._json({'error': 'کتاب پیدا نشد.'}, 404); return
             try:
                 self._json(get_proposal(
-                    db, int(parsed.path.split('/')[3]),
+                    db, book_id,
                     query.get('from', ['EN'])[0], query.get('to', ['FA'])[0], origin,
                 ))
             except LookupError as exc: self._json({'error': str(exc)}, 404)
@@ -1273,17 +1547,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith('/api/library/') and parsed.path.endswith('/glossary'):
             query = parse_qs(parsed.query)
+            book_id = int(parsed.path.split('/')[3])
+            if not self._owned_book(book_id):
+                self._json({'error': 'کتاب پیدا نشد.'}, 404); return
             try:
                 with JOBS_LOCK:
-                    book_jobs = [job for job in JOBS.values() if job.paths]
+                    book_jobs = [job for job in JOBS.values()
+                                 if job.paths and int(job.user_id) == self._user_id()]
                 for job in book_jobs:
                     _update_progress(job)
-                self._json(get_glossary(db, int(parsed.path.split('/')[3]), query.get('from', ['EN'])[0], query.get('to', ['FA'])[0]))
+                self._json(get_glossary(db, book_id, query.get('from', ['EN'])[0], query.get('to', ['FA'])[0]))
             except LookupError as exc: self._json({'error': str(exc)}, 404)
             except ValueError as exc: self._json({'error': str(exc)}, 400)
             return
         if parsed.path == "/api/reader/settings":
-            self._json({"value": reading_settings()}); return
+            self._json({"value": reading_settings(self._user_id())}); return
         if parsed.path.startswith("/api/reader/") and parsed.path.endswith("/glossary"):
             job = self._job(parsed.path.split("/")[3])
             if not job or job.filetype != "epub":
@@ -1350,7 +1628,7 @@ class Handler(BaseHTTPRequestHandler):
             except _CLIENT_GONE: pass
             return
         if parsed.path == "/api/dashboard/summary":
-            self._json(dashboard_summary()); return
+            self._json(dashboard_summary(self._user_id())); return
         if parsed.path == "/api/auth/me":
             user = user_from_token(db, self._session_token())
             if user is None: self._json({"error": "وارد نشده‌اید."}, 401); return
@@ -1403,26 +1681,31 @@ class Handler(BaseHTTPRequestHandler):
             for name, value in self._set_session_cookie(token).items(): self.send_header(name, value)
             self.end_headers(); return
         if parsed.path == "/api/account/portal":
-            self._json({"overview": account_overview(), "plans": plans_catalog(), "packages": credit_packages(), "api_keys": account_api_keys(), "marketplace": account_marketplace(), "orders": account_orders(), "publisher": publisher_overview()}); return
+            uid = self._user_id()
+            self._json({"overview": account_overview(uid), "plans": plans_catalog(), "packages": credit_packages(), "api_keys": account_api_keys(uid), "marketplace": account_marketplace("", uid), "orders": account_orders(uid), "publisher": publisher_overview(uid)}); return
         if parsed.path == "/api/account/backup":
+            if not self._is_admin():
+                self._json({"error": "دسترسی به بکاپ فقط برای مدیر سرور است."}, 403); return
             backups = db.list_backups()
             if not backups or not backups[0].is_file(): self._json({"error": "بکاپی وجود ندارد."}, 404); return
             latest = backups[0]
             self._send_file(latest, "application/octet-stream", f'attachment; filename="{latest.name}"')
             return
         if parsed.path == "/api/account/marketplace":
-            self._json(account_marketplace(parse_qs(parsed.query).get("kind", [""])[0])); return
+            self._json(account_marketplace(parse_qs(parsed.query).get("kind", [""])[0], self._user_id())); return
         if parsed.path == "/api/jobs":
             status_filter = dict(item.split("=", 1) for item in parsed.query.split("&") if "=" in item).get("status") if parsed.query else None
+            uid = self._user_id()
             with JOBS_LOCK:
-                jobs = [_job_payload(job) for job in JOBS.values() if not status_filter or job.status == status_filter]
+                jobs = [_job_payload(job) for job in JOBS.values()
+                        if int(job.user_id) == uid and (not status_filter or job.status == status_filter)]
             self._json({"items": jobs, "total": len(jobs)}); return
         if parsed.path == "/api/languages":
             self._json({"items": [{"code": code, "name": name} for code, name in [("EN", "English"), ("FA", "فارسی"), ("DE", "Deutsch"), ("FR", "Français"), ("AR", "العربية")]]}); return
         if parsed.path == "/api/models":
             self._json({"items": [{"id": model_id, "provider": "configured", "available": True} for model_id in SUPPORTED_MODELS]}); return
         if parsed.path == "/api/profiles":
-            self._json({"items": db.fetch_all("SELECT id, name, temperature, preserve_html, preserve_quotes, glossary_id, created_at, updated_at FROM translation_profiles ORDER BY name")}); return
+            self._json({"items": db.fetch_all("SELECT id, name, temperature, preserve_html, preserve_quotes, glossary_id, created_at, updated_at FROM translation_profiles WHERE user_id=? ORDER BY name", (self._user_id(),))}); return
         if parsed.path == "/api/providers":
             config = read_config_safe().get("openai", {})
             self._json({"items": [{"name": "configured", "base_url": config.get("base_url") or DEFAULT_BASE_URL, "enabled": bool(config.get("api_key"))}]}); return
@@ -1441,11 +1724,11 @@ class Handler(BaseHTTPRequestHandler):
                 "max_concurrency": max(1, min(int(translation_config.get("max_concurrency", 3)), MAX_TRANSLATION_CONCURRENCY)),
             }); return
         if parsed.path == "/api/glossaries":
-            self._json({"items": db.fetch_all("SELECT g.*, COUNT(t.id) AS term_count FROM glossaries g LEFT JOIN glossary_terms t ON t.glossary_id=g.id GROUP BY g.id ORDER BY g.name")}); return
+            self._json({"items": db.fetch_all("SELECT g.*, COUNT(t.id) AS term_count FROM glossaries g LEFT JOIN glossary_terms t ON t.glossary_id=g.id WHERE g.user_id=? GROUP BY g.id ORDER BY g.name", (self._user_id(),))}); return
         if parsed.path == "/api/memory/search":
-            self._json({"items": db.fetch_all("SELECT * FROM translation_memory ORDER BY last_used_at DESC LIMIT 100")}); return
+            self._json({"items": db.fetch_all("SELECT * FROM translation_memory WHERE user_id=? ORDER BY last_used_at DESC LIMIT 100", (self._user_id(),))}); return
         if parsed.path == "/api/memory/export":
-            self._json({"items": db.fetch_all("SELECT * FROM translation_memory ORDER BY id")}); return
+            self._json({"items": db.fetch_all("SELECT * FROM translation_memory WHERE user_id=? ORDER BY id", (self._user_id(),))}); return
         if parsed.path == "/api/library":
             self._json(library_summary(parsed.query, _library_user_id(self._session_token()))); return
         if parsed.path == "/api/reading/stats":
@@ -1455,9 +1738,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(book_shelves.reading_stats(db, _library_user_id(self._session_token()), days)); return
         if parsed.path.startswith("/api/library/") and parsed.path.endswith("/files"):
             book_id = parsed.path.split("/")[3]
-            book = db.fetch_one("SELECT * FROM library_books WHERE id=?", (book_id,))
+            book = self._owned_book(book_id)
             if not book: self._json({"error": "Book not found."}, 404); return
-            self._json({"book": book, "items": db.fetch_all("SELECT * FROM files WHERE book_id=? ORDER BY id", (book_id,))}); return
+            self._json({"book": book, "items": db.fetch_all("SELECT * FROM files WHERE book_id=? AND user_id=? ORDER BY id", (book_id, self._user_id()))}); return
         if parsed.path.startswith("/api/library/") and parsed.path.count("/") == 3:
             book_id = parsed.path.rsplit("/", 1)[-1]
             uid = _library_user_id(self._session_token())
@@ -1465,20 +1748,25 @@ class Handler(BaseHTTPRequestHandler):
             if not result: self._json({"error": "Book not found."}, 404); return
             self._json(result); return
         if parsed.path == "/api/analytics/overview":
-            self._json(db.fetch_one("SELECT COUNT(*) AS jobs, COALESCE(SUM(progress_completed),0) AS completed_chunks, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(retry_count),0) AS retries FROM jobs") or {}); return
+            self._json(db.fetch_one("SELECT COUNT(*) AS jobs, COALESCE(SUM(progress_completed),0) AS completed_chunks, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(retry_count),0) AS retries FROM jobs WHERE user_id=?", (self._user_id(),)) or {}); return
         if parsed.path == "/api/settings":
+            if not self._is_admin():
+                self._json({"items": []}); return
             settings = db.fetch_all("SELECT key, value_json, updated_at FROM settings ORDER BY key")
             self._json({"items": [{**item, "value": json.loads(item.pop("value_json"))} for item in settings]}); return
         if parsed.path == "/api/logs":
             level = next((item.split("=", 1)[1] for item in parsed.query.split("&") if item.startswith("level=")), None)
+            uid = self._user_id()
             if level:
-                self._json({"items": db.fetch_all("SELECT * FROM job_events WHERE level=? ORDER BY timestamp DESC LIMIT 200", (level.upper(),))})
+                self._json({"items": db.fetch_all("SELECT e.* FROM job_events e JOIN jobs j ON j.id=e.job_id WHERE j.user_id=? AND e.level=? ORDER BY e.timestamp DESC LIMIT 200", (uid, level.upper()))})
             else:
-                self._json({"items": db.fetch_all("SELECT * FROM job_events ORDER BY timestamp DESC LIMIT 200")})
+                self._json({"items": db.fetch_all("SELECT e.* FROM job_events e JOIN jobs j ON j.id=e.job_id WHERE j.user_id=? ORDER BY e.timestamp DESC LIMIT 200", (uid,))})
             return
         if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/logs"):
-            job_id = parsed.path.split("/")[-2]
-            self._json({"items": db.fetch_all("SELECT * FROM job_events WHERE job_id=? ORDER BY timestamp ASC", (job_id,))}); return
+            job = self._job(parsed.path.split("/")[-2])
+            if not job:
+                self._json({"error": "کار موردنظر پیدا نشد."}, 404); return
+            self._json({"items": db.fetch_all("SELECT * FROM job_events WHERE job_id=? ORDER BY timestamp ASC", (job.id,))}); return
         if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/chunks"):
             self._json(_job_chunks_payload(self._job(parsed.path.split("/")[-2]))); return
         if parsed.path == "/api/health":
@@ -1496,11 +1784,19 @@ class Handler(BaseHTTPRequestHandler):
             name = parsed.path[len("/covers/"):]
             if not re.fullmatch(r"[0-9]+\.(jpg|jpeg|png|webp|gif)", name):
                 self.send_error(404); return
-            cover_file = COVERS_DIR / name
+            book_id = name.split(".", 1)[0]
+            book = self._owned_book(book_id)
+            if not book:
+                self.send_error(404); return
+            cover_file = user_covers_dir(self._user_id()) / name
+            if not cover_file.is_file() and self._is_admin():
+                legacy = COVERS_DIR / name
+                if legacy.is_file():
+                    cover_file = legacy
             if not cover_file.is_file():
                 self.send_error(404); return
             mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-            self._send_file(cover_file, mime, extra={"Cache-Control": "public, max-age=86400"})
+            self._send_file(cover_file, mime, extra={"Cache-Control": "private, max-age=86400"})
             return
         if parsed.path.startswith("/downloads/"):
             if parsed.path.startswith("/downloads/convert/"):
@@ -1508,9 +1804,11 @@ class Handler(BaseHTTPRequestHandler):
                 if "/" in rest:
                     convert_id, format_name = rest.split("/", 1)
                     entry = CONVERTS.get(convert_id)
+                    if entry and int(entry.get("user_id", 1)) != self._user_id():
+                        entry = None
                     file_path = (entry or {}).get("generated", {}).get(format_name) if entry else None
                     if not file_path:
-                        cand_dir = WEB_OUTPUT_DIR / f"convert_{convert_id}"
+                        cand_dir = user_output_dir(self._user_id()) / f"convert_{convert_id}"
                         if cand_dir.is_dir():
                             from app.output.formats import SUFFIXES as _SUFFIXES
                             if format_name not in _SUFFIXES:
@@ -1521,13 +1819,13 @@ class Handler(BaseHTTPRequestHandler):
                                     file_path = str(cand)
                                     break
                     p2 = Path(file_path) if file_path else None
-                    if not p2 or not p2.is_file() or WEB_OUTPUT_DIR not in p2.parents:
+                    if not p2 or not p2.is_file() or user_output_dir(self._user_id()) not in p2.parents:
                         self.send_error(404); return
                     self._send_file(p2, "application/octet-stream", f'attachment; filename="{p2.name}"')
                     return
             if parsed.path.startswith("/downloads/rescue/"):
                 job = self._job(parsed.path.rsplit("/", 1)[-1])
-                rescue_path = WEB_OUTPUT_DIR / f"{job.id}_rescue.zip" if job else None
+                rescue_path = user_output_dir(job.user_id) / f"{job.id}_rescue.zip" if job else None
                 if not rescue_path or not rescue_path.is_file(): self.send_error(404); return
                 self._send_file(rescue_path, "application/zip", f'attachment; filename="{rescue_path.name}"')
                 return
@@ -1536,7 +1834,7 @@ class Handler(BaseHTTPRequestHandler):
                 asset_job = self._job(asset_job_id)
                 asset_path = (asset_job.assets or {}).get(asset_name) if asset_job else None
                 asset_file = Path(asset_path) if asset_path else None
-                if not asset_file or not asset_file.is_file() or WEB_OUTPUT_DIR not in asset_file.parents:
+                if not asset_file or not asset_file.is_file() or user_output_dir(asset_job.user_id) not in asset_file.parents:
                     self.send_error(404); return
                 self._send_file(asset_file, "application/octet-stream", f'attachment; filename="{asset_file.name}"')
                 return
@@ -1551,12 +1849,26 @@ class Handler(BaseHTTPRequestHandler):
         path=urlparse(self.path).path
         if path in {"/api/auth/signup", "/api/auth/login", "/api/auth/logout",
                       "/api/auth/change-password", "/api/auth/sessions/revoke", "/api/auth/revoke-all",
-                      "/api/auth/email-code/request", "/api/auth/email-code/verify"}:
+                      "/api/auth/email-code/request", "/api/auth/email-code/verify",
+                      "/api/auth/password-reset/request", "/api/auth/password-reset/confirm"}:
             try: body = self._request_json()
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             if path == "/api/auth/logout":
                 auth_logout(db, self._session_token())
                 self._json({"ok": True}, headers=self._clear_session_cookie()); return
+            if path == "/api/auth/password-reset/request":
+                try:
+                    self._json(auth_request_password_reset(db, body.get("email")))
+                except LookupError as exc: self._json({"error": str(exc)}, 429)
+                except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
+                return
+            if path == "/api/auth/password-reset/confirm":
+                try:
+                    user = auth_reset_password(db, body.get("email"), body.get("code"), body.get("new_password"))
+                    self._json({"user": user}, headers=self._clear_session_cookie())
+                except LookupError as exc: self._json({"error": str(exc)}, 401)
+                except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
+                return
             if path == "/api/auth/email-code/request":
                 try:
                     result = auth_request_email_code(db, body.get("email"))
@@ -1596,27 +1908,32 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = self._request_json()
                 book_id = int(path.split('/')[3])
+                if not self._owned_book(book_id):
+                    raise LookupError('کتاب پیدا نشد.')
                 snapshot = get_glossary(db, book_id, body.get('from_lang', 'EN'), body.get('to_lang', 'FA'))
                 auto_extract = body.get('auto_glossary', True)
                 if type(auto_extract) is not bool:
                     raise ValueError('گزینهٔ واژه‌نامهٔ خودکار باید روشن یا خاموش باشد.')
                 snapshot['auto_extract'] = auto_extract
-                source = db.fetch_one("SELECT * FROM files WHERE book_id=? AND kind='original' ORDER BY id LIMIT 1", (book_id,))
+                source = db.fetch_one("SELECT * FROM files WHERE book_id=? AND user_id=? AND kind='original' ORDER BY id LIMIT 1", (book_id, self._user_id()))
                 if not source or not Path(source['path']).is_file():
                     raise ValueError('فایل اصلی کتاب در دسترس نیست.')
                 model = body.get('model', DEFAULT_MODEL)
                 if not isinstance(model, str) or not model.strip() or len(model) > 150 or any(char in model for char in '/\\:'):
                     raise ValueError('مدل نامعتبر است.')
                 options = dict(from_lang=snapshot['source_language'], to_lang=snapshot['target_language'], model=model.strip(), mode='fast', prompt='', outputs=body.get('outputs') or '', glossary_snapshot=json.dumps(snapshot, ensure_ascii=False))
+                uid = self._user_id()
                 with JOBS_LOCK:
-                    if any(item.status in {'queued', 'running'} for item in JOBS.values()):
+                    if any(item.status in {'queued', 'running'} and int(item.user_id) == uid for item in JOBS.values()):
                         self._json({'error': 'یک ترجمه در حال اجراست.'}, 409); return
-                    job = Job(uuid.uuid4().hex[:12], source['display_name'] or Path(source['path']).name, Path(source['path']), source['extension'], source['size_bytes'], options, options['from_lang'], options['to_lang'], options['model'], 'fast')
+                    job = Job(uuid.uuid4().hex[:12], source['display_name'] or Path(source['path']).name, Path(source['path']), source['extension'], source['size_bytes'], options, options['from_lang'], options['to_lang'], options['model'], 'fast', user_id=uid)
+                    _charge_job_start(uid, job.id)
                     _persist_job(job)
-                    db.execute('INSERT INTO files(job_id,book_id,path,kind,display_name,extension,size_bytes,created_at) VALUES (?,?,?,?,?,?,?,?)', (job.id, book_id, source['path'], 'original', job.filename, job.filetype, job.file_size, now()))
+                    db.execute('INSERT INTO files(user_id,job_id,book_id,path,kind,display_name,extension,size_bytes,created_at) VALUES (?,?,?,?,?,?,?,?,?)', (uid, job.id, book_id, source['path'], 'original', job.filename, job.filetype, job.file_size, now()))
                     JOBS[job.id] = job
                 threading.Thread(target=_run_job, args=(job,), daemon=True).start()
                 self._json({'id': job.id}, 201)
+            except account_billing.InsufficientCredit as exc: self._json({'error': str(exc)}, 402)
             except LookupError as exc: self._json({'error': str(exc)}, 404)
             except (ValueError, TypeError) as exc: self._json({'error': str(exc)}, 400)
             return
@@ -1646,9 +1963,10 @@ class Handler(BaseHTTPRequestHandler):
             if not filename or suffix not in {".epub",".pdf",".srt",".txt",".md"}:
                 self._json({"error":"فرمت فایل برای تبدیل پشتیبانی نمی‌شود. (EPUB, PDF, SRT, TXT)"},400); return
             convert_id = uuid.uuid4().hex[:10]
-            input_path = UPLOAD_DIR / f"convert_{convert_id}_{filename}"
+            input_path = user_upload_dir(self._user_id()) / f"convert_{convert_id}_{filename}"
             try:
-                ensure_disk_space(UPLOAD_DIR, required_bytes=len(upload_data) * 3)
+                check_user_quota(self._user_id(), len(upload_data))
+                ensure_disk_space(input_path.parent, required_bytes=len(upload_data) * 3)
                 input_path.write_bytes(upload_data)
             except (OSError, ValueError) as exc:
                 if input_path.exists(): input_path.unlink(missing_ok=True)
@@ -1662,11 +1980,11 @@ class Handler(BaseHTTPRequestHandler):
                 if input_path.exists(): input_path.unlink(missing_ok=True)
                 self._json({"error":str(exc)},400); return
             try:
-                output_dir = WEB_OUTPUT_DIR / f"convert_{convert_id}"
+                output_dir = user_output_dir(self._user_id()) / f"convert_{convert_id}"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 result = convert_file(input_path, output_dir, normalized, title=Path(filename).stem)
                 with CONVERTS_LOCK:
-                    CONVERTS[convert_id] = {"generated": result["generated"], "source": filename, "created_at": now()}
+                    CONVERTS[convert_id] = {"generated": result["generated"], "source": filename, "created_at": now(), "user_id": self._user_id()}
                 versions = [{"name": name, "download": f"/downloads/convert/{convert_id}/{name}", "filename": Path(pp).name} for name, pp in result["generated"].items()]
                 self._json({"id": convert_id, "versions": versions, "generated": result["generated"]}, 201)
             except Exception as exc:
@@ -1685,7 +2003,7 @@ class Handler(BaseHTTPRequestHandler):
             name = str(body.get("name", "")).strip()
             if not name: self._json({"error": "Glossary name is required."}, 400); return
             try:
-                gid = db.execute("INSERT INTO glossaries(name, description, created_at, updated_at) VALUES (?, ?, ?, ?)", (name, str(body.get("description", "")), now(), now()))
+                gid = db.execute("INSERT INTO glossaries(user_id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", (self._user_id(), name, str(body.get("description", "")), now(), now()))
             except Exception as exc: self._json({"error": "Glossary already exists or is invalid."}, 409); return
             self._json({"id": gid, "name": name}, 201); return
         if path == "/api/memory":
@@ -1693,7 +2011,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             required = ["source_text", "translated_text", "source_language", "target_language"]
             if any(not str(body.get(k, "")).strip() for k in required): self._json({"error": "source_text, translated_text and languages are required."}, 400); return
-            db.execute("INSERT INTO translation_memory(source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, confidence=excluded.confidence, last_used_at=excluded.last_used_at", tuple(str(body.get(k, "")) for k in required) + (str(body.get("source", "manual")), float(body.get("confidence", 1)), now()))
+            db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, confidence=excluded.confidence, last_used_at=excluded.last_used_at", (self._user_id(),) + tuple(str(body.get(k, "")) for k in required) + (str(body.get("source", "manual")), float(body.get("confidence", 1)), now()))
             self._json({"ok": True}, 201); return
         if path == "/api/memory/import":
             try: body = self._request_json(); entries = body.get("items", body.get("entries", []))
@@ -1701,7 +2019,7 @@ class Handler(BaseHTTPRequestHandler):
             count = 0
             for item in entries if isinstance(entries, list) else []:
                 try:
-                    db.execute("INSERT INTO translation_memory(source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, last_used_at=excluded.last_used_at", (item["source_text"], item["translated_text"], item.get("source_language", "EN"), item.get("target_language", "FA"), item.get("source", "import"), float(item.get("confidence", 1)), now())); count += 1
+                    db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, last_used_at=excluded.last_used_at", (self._user_id(), item["source_text"], item["translated_text"], item.get("source_language", "EN"), item.get("target_language", "FA"), item.get("source", "import"), float(item.get("confidence", 1)), now())); count += 1
                 except (KeyError, TypeError, ValueError): continue
             self._json({"imported": count}); return
         if path == "/api/profiles":
@@ -1710,7 +2028,7 @@ class Handler(BaseHTTPRequestHandler):
             name, prompt = str(body.get("name", "")).strip(), str(body.get("system_prompt", "")).strip()
             if not name or not prompt: self._json({"error": "name and system_prompt are required."}, 400); return
             try:
-                pid = db.execute("INSERT INTO translation_profiles(name, system_prompt, temperature, preserve_html, preserve_quotes, glossary_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (name, prompt, float(body.get("temperature", .2)), int(bool(body.get("preserve_html", True))), int(bool(body.get("preserve_quotes", True))), body.get("glossary_id"), now(), now()))
+                pid = db.execute("INSERT INTO translation_profiles(user_id, name, system_prompt, temperature, preserve_html, preserve_quotes, glossary_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (self._user_id(), name, prompt, float(body.get("temperature", .2)), int(bool(body.get("preserve_html", True))), int(bool(body.get("preserve_quotes", True))), body.get("glossary_id"), now(), now()))
             except Exception: self._json({"error": "Profile already exists or is invalid."}, 409); return
             self._json({"id": pid, "name": name}, 201); return
         if path == "/api/jobs/upload":
@@ -1721,7 +2039,7 @@ class Handler(BaseHTTPRequestHandler):
             # as `upload_token` and the start route looks it up.
             try:
                 fields, filename, payload = _parse_upload(self)
-                target = _store_upload(filename, payload)
+                target = _store_upload(filename, payload, self._user_id())
             except ValueError as exc: self._json({"error": str(exc)}, 400); return
             except OSError as exc: self._json({"error": str(exc)}, 500); return
             self._json({
@@ -1744,6 +2062,11 @@ class Handler(BaseHTTPRequestHandler):
                 file_path = str(body.get("file_path") or body.get("path") or "")
                 if not file_path:
                     raise ValueError("file_path is required.")
+                requested = Path(file_path).resolve()
+                root = user_upload_dir(self._user_id()).resolve()
+                if root not in requested.parents or not requested.is_file():
+                    raise LookupError("فایل موردنظر پیدا نشد.")
+                file_path = str(requested)
                 model = str(body.get("model") or DEFAULT_MODEL)
                 settings = get_translation_config()
                 mode = str(body.get("mode") or "fast")
@@ -1770,6 +2093,7 @@ class Handler(BaseHTTPRequestHandler):
                     max_tokens=int(settings.get("chunk_max_tokens") or 1200),
                     context_window=int(settings.get("chunk_context_window") or 2),
                 ).to_payload()); return
+            except LookupError as exc: self._json({"error": str(exc)}, 404); return
             except (ValueError, TypeError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             except Exception as exc: self._json({"error": _friendly_error(exc)}, 500); return
         if path == "/api/provider-config/test":
@@ -1781,29 +2105,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": _friendly_error(exc)}, 502); return
         if path == "/api/account/checkout":
             try:
-                body = self._request_json(); self._json(start_checkout(str(body.get("kind", "")), str(body.get("reference_id", ""))), 201)
+                body = self._request_json(); self._json(start_checkout(str(body.get("kind", "")), str(body.get("reference_id", "")), self._user_id()), 201)
             except LookupError as exc: self._json({"error": str(exc)}, 404)
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
             return
         if path == "/api/account/api-keys":
             try:
-                body = self._request_json(); self._json(create_api_key(body.get("name", ""), body.get("scopes", "translate:write jobs:read")), 201)
+                body = self._request_json(); self._json(create_api_key(body.get("name", ""), body.get("scopes", "translate:write jobs:read"), self._user_id()), 201)
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
             return
         if path.startswith("/api/account/api-keys/") and path.endswith("/revoke"):
-            try: revoke_api_key(int(path.split("/")[-2])); self._json({"ok": True})
+            try: revoke_api_key(int(path.split("/")[-2]), self._user_id()); self._json({"ok": True})
             except ValueError as exc: self._json({"error": str(exc)}, 400)
             return
         if path.startswith("/api/account/marketplace/") and path.endswith("/install"):
-            try: self._json(install_marketplace_item(path.split("/")[-2]), 201)
+            try: self._json(install_marketplace_item(path.split("/")[-2], self._user_id()), 201)
             except LookupError as exc: self._json({"error": str(exc)}, 404)
             return
         if path == "/api/account/orders":
-            try: self._json(create_order(self._request_json()), 201)
+            try: self._json(create_order(self._request_json(), self._user_id()), 201)
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
             return
         if path == "/api/account/business-requests":
-            try: self._json(create_business_request(self._request_json()), 201)
+            try: self._json(create_business_request(self._request_json(), self._user_id()), 201)
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
             return
         if path.startswith("/api/providers/") and path.endswith("/test"):
@@ -1813,21 +2137,27 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": bool(config.get("api_key")), "status": "ready" if config.get("api_key") else "not_configured", "base_url": config.get("base_url") or DEFAULT_BASE_URL}); return
         if path.startswith("/api/glossaries/") and path.endswith("/import"):
             gid = path.split("/")[-2]
+            if not db.fetch_one("SELECT id FROM glossaries WHERE id=? AND user_id=?", (gid, self._user_id())):
+                self._json({"error": "Glossary not found."}, 404); return
             try: body = self._request_json(); terms = body.get("terms", body.get("items", []))
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             count = 0
             for term in terms if isinstance(terms, list) else []:
                 if not term.get("source_term") or not term.get("target_term"): continue
-                db.execute("INSERT INTO glossary_terms(glossary_id, source_term, target_term, notes) VALUES (?, ?, ?, ?) ON CONFLICT(glossary_id, source_term) DO UPDATE SET target_term=excluded.target_term, notes=excluded.notes", (gid, term["source_term"], term["target_term"], term.get("notes", ""))); count += 1
+                db.execute("INSERT INTO glossary_terms(user_id, glossary_id, source_term, target_term, notes) VALUES (?, ?, ?, ?, ?) ON CONFLICT(glossary_id, source_term) DO UPDATE SET target_term=excluded.target_term, notes=excluded.notes", (self._user_id(), gid, term["source_term"], term["target_term"], term.get("notes", ""))); count += 1
             self._json({"imported": count}); return
         if path.startswith("/api/library/") and path.endswith("/archive"):
             book_id = path.split("/")[-2]
-            db.execute("UPDATE library_books SET archived=1, updated_at=? WHERE id=?", (now(), book_id)); db.execute("UPDATE files SET archived=1 WHERE book_id=?", (book_id,)); self._json({"ok": True}); return
+            if not self._owned_book(book_id):
+                self._json({"error": "Book not found."}, 404); return
+            db.execute("UPDATE library_books SET archived=1, updated_at=? WHERE id=? AND user_id=?", (now(), book_id, self._user_id())); db.execute("UPDATE files SET archived=1 WHERE book_id=? AND user_id=?", (book_id, self._user_id())); self._json({"ok": True}); return
         if path.startswith("/api/library/") and path.endswith("/progress"):
             try: body = self._request_json()
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             try:
                 book_id = int(path.split("/")[3])
+                if not self._owned_book(book_id):
+                    raise LookupError("کتاب پیدا نشد.")
                 result = book_shelves.record_progress(db, _library_user_id(self._session_token()), book_id, body.get("pages"), body.get("location"))
                 self._json({"ok": True, **result}); return
             except LookupError as exc: self._json({"error": str(exc)}, 404); return
@@ -1848,8 +2178,12 @@ class Handler(BaseHTTPRequestHandler):
             try: body = self._request_json()
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             try:
-                self._json(_generate_proposal(int(path.split('/')[3]), body), 201)
+                book_id = int(path.split('/')[3])
+                if not self._owned_book(book_id):
+                    raise LookupError('کتاب پیدا نشد.')
+                self._json(_generate_proposal(book_id, body, self._user_id()), 201)
             except LookupError as exc: self._json({'error': str(exc)}, 404)
+            except account_billing.InsufficientCredit as exc: self._json({'error': str(exc)}, 402)
             except (ValueError, TypeError) as exc: self._json({'error': str(exc)}, 400)
             except Exception as exc: self._json({'error': _friendly_error(exc)}, 502)
             return
@@ -1867,7 +2201,7 @@ class Handler(BaseHTTPRequestHandler):
             # the conflict question rather than a default.
             force = (fields.get("force", "") or "").strip().lower() in {"1", "true", "yes"}
             try:
-                self._json(_import_rescue(payload, force=force), 201); return
+                self._json(_import_rescue(payload, force=force, user_id=self._user_id()), 201); return
             except _RescueConflict as conflict:
                 # 409 with the differences, so the page can ask rather than pick.
                 self._json({
@@ -1899,24 +2233,47 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as exc: self._json({"error": str(exc)}, 500)
             return
         if path!="/api/jobs": self.send_error(404); return
+        uid = self._user_id()
+        content_type = self.headers.get("Content-Type", "")
         try:
-            fields, filename, upload_data = _parse_upload(self)
-            input_path = _store_upload(filename, upload_data)
-        except ValueError as exc: self._json({"error": str(exc)}, 400); return
-        except OSError as exc: self._json({"error": str(exc)}, 500); return
-        job_id=input_path.name.split('_', 1)[0]
-        # The filetype, without the dot. _store_upload has already rejected
-        # anything that is not .epub or .pdf, so this cannot be empty here.
+            if "application/json" in content_type:
+                fields = self._request_json()
+                filename, upload_data = "", b""
+            else:
+                fields, filename, upload_data = _parse_upload(self, required=False)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json({"error": str(exc)}, 400); return
+        token = str(fields.get("upload_id") or fields.get("upload_token") or "").strip()
+        fresh_upload = False
+        try:
+            if token:
+                input_path = resolve_upload(uid, token)
+                job_id = input_path.name.split('_', 1)[0]
+                filename = filename or input_path.name.split('_', 1)[-1]
+                upload_size = input_path.stat().st_size
+            else:
+                if not filename or not upload_data:
+                    raise ValueError("فایلی برای ترجمه ارسال نشده است.")
+                input_path = _store_upload(filename, upload_data, uid)
+                fresh_upload = True
+                job_id = input_path.name.split('_', 1)[0]
+                upload_size = len(upload_data)
+        except LookupError as exc:
+            self._json({"error": str(exc)}, 404); return
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 400); return
+        except OSError as exc:
+            self._json({"error": str(exc)}, 500); return
         suffix=Path(filename).suffix.lower()
         if suffix == ".txt":
             self._json({"error": "فایل TXT را از مسیر تأیید نمونه شروع کنید."}, 400); return
         try:
             validate_book(input_path)
         except (OSError, ValueError) as exc:
-            if input_path.exists(): input_path.unlink()
+            if fresh_upload and input_path.exists(): input_path.unlink()
             self._json({"error":str(exc)},400); return
-        options={key:fields.get(key,"").strip() for key in ("from_lang","to_lang","model","mode","prompt","debug")}
-        options["preserve_voice"] = fields.get("preserve_voice", "false")
+        options={key:str(fields.get(key,"") or "").strip() for key in ("from_lang","to_lang","model","mode","prompt","debug")}
+        options["preserve_voice"] = str(fields.get("preserve_voice", "false"))
         options["from_lang"] = options["from_lang"] or "EN"
         options["to_lang"] = options["to_lang"] or "FA"
         # An empty model field resolves through config.yaml, not the code
@@ -1925,6 +2282,7 @@ class Handler(BaseHTTPRequestHandler):
         if not is_supported_model(options["model"]):
             # Reject here rather than letting an unknown name reach the
             # provider, where it would fail on the first paid chunk.
+            if fresh_upload and input_path.exists(): input_path.unlink()
             self._json({"error": "مدل «%s» پشتیبانی نمی‌شود." % options["model"]}, 400)
             return
         options["mode"] = options["mode"] or "fast"
@@ -1932,27 +2290,41 @@ class Handler(BaseHTTPRequestHandler):
         # and it must become the fast run it will actually be, not a failure.
         if options["mode"] not in {"fast", "resume", "test", "pdfbilingual"}:
             options["mode"] = "fast"
-        options["outputs"] = fields.get("outputs", "")
-        options["style_preset"] = fields.get("style_preset", "literary")
-        job=Job(job_id,filename,input_path,suffix.lstrip("."),len(upload_data),options,options["from_lang"],options["to_lang"],options["model"],options["mode"],style=options.get("style_preset","literary"))
-        with JOBS_LOCK: JOBS[job_id]=job
-        _persist_job(job)
-        _job_event(job, "queued", "کتاب به صف ترجمه اضافه شد.")
-        book_id = None
+        raw_outputs = fields.get("outputs", "")
+        options["outputs"] = ",".join(str(item) for item in raw_outputs) if isinstance(raw_outputs, list) else str(raw_outputs or "")
+        options["style_preset"] = str(fields.get("style_preset", "literary") or "literary")
         try:
-            book_id = _ensure_library_source(job)
-            snapshot = get_glossary(db, book_id, options['from_lang'], options['to_lang'])
-            # glossary_mode is the explicit switch; the form field is only a
-            # compatibility shim for clients that still send the old checkbox.
-            snapshot['auto_extract'] = fields.get('auto_glossary', 'false') == 'true' and options['mode'] != 'test'
-            options['glossary_snapshot'] = json.dumps(snapshot, ensure_ascii=False)
-            _persist_job(job)
-        except Exception:
-            # The translation Job remains authoritative if the library index is unavailable.
-            pass
-        threading.Thread(target=_run_job,args=(job,),daemon=True).start()
-        self._json({"id": job_id, "book_id": book_id,
-                    "from_lang": options["from_lang"], "to_lang": options["to_lang"]},201)
+            with JOBS_LOCK:
+                if any(item.status in {"queued", "running"} and int(item.user_id) == uid for item in JOBS.values()):
+                    self._json({"error": "یک ترجمه در حال اجراست."}, 409); return
+                if job_id in JOBS:
+                    self._json({"error": "این فایل از قبل در حال ترجمه است."}, 409); return
+                job=Job(job_id, filename, input_path, suffix.lstrip("."), upload_size, options,
+                        options["from_lang"], options["to_lang"], options["model"], options["mode"],
+                        style=options.get("style_preset","literary"), user_id=uid)
+                _charge_job_start(uid, job.id)
+                JOBS[job_id]=job
+                _persist_job(job)
+                _job_event(job, "queued", "کتاب به صف ترجمه اضافه شد.")
+                book_id = None
+                try:
+                    book_id = _ensure_library_source(job)
+                    snapshot = get_glossary(db, book_id, options['from_lang'], options['to_lang'])
+                    # glossary_mode is the explicit switch; the form field is only a
+                    # compatibility shim for clients that still send the old checkbox.
+                    snapshot['auto_extract'] = fields.get('auto_glossary', 'false') == 'true' and options['mode'] != 'test'
+                    options['glossary_snapshot'] = json.dumps(snapshot, ensure_ascii=False)
+                    _persist_job(job)
+                except Exception:
+                    # The translation Job remains authoritative if the library index is unavailable.
+                    pass
+            threading.Thread(target=_run_job,args=(job,),daemon=True).start()
+            self._json({"id": job_id, "book_id": book_id,
+                        "from_lang": options["from_lang"], "to_lang": options["to_lang"]},201)
+        except account_billing.InsufficientCredit as exc:
+            self._json({"error": str(exc)}, 402)
+        except (ValueError, TypeError) as exc:
+            self._json({"error": str(exc)}, 400)
 
     def do_PUT(self) -> None:
         if not self._guarded(): return
@@ -1962,13 +2334,19 @@ class Handler(BaseHTTPRequestHandler):
             try: body = self._request_json()
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             try:
-                self._json(_approve_proposal(int(path.split('/')[3]), body))
+                book_id = int(path.split('/')[3])
+                if not self._owned_book(book_id):
+                    raise LookupError('کتاب پیدا نشد.')
+                self._json(_approve_proposal(book_id, body))
             except LookupError as exc: self._json({'error': str(exc)}, 404)
             except (ValueError, TypeError) as exc: self._json({'error': str(exc)}, 400)
             return
         if path.startswith('/api/library/') and path.endswith('/glossary'):
             try:
-                self._json(save_glossary(db, int(path.split('/')[3]), self._request_json()))
+                book_id = int(path.split('/')[3])
+                if not self._owned_book(book_id):
+                    raise LookupError('کتاب پیدا نشد.')
+                self._json(save_glossary(db, book_id, self._request_json()))
             except LookupError as exc: self._json({'error': str(exc)}, 404)
             except (ValueError, TypeError) as exc: self._json({'error': str(exc)}, 400)
             return
@@ -1977,6 +2355,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/library/") and path.endswith("/shelf"):
             try:
                 book_id = int(path.split("/")[3])
+                if not self._owned_book(book_id):
+                    raise LookupError("کتاب پیدا نشد.")
                 shelf = body.get("shelf")
                 result = book_shelves.set_shelf(db, _library_user_id(self._session_token()), book_id, shelf)
                 self._json({"ok": True, "shelf": result}); return
@@ -1985,15 +2365,19 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/library/") and path.endswith("/tags"):
             try:
                 book_id = int(path.split("/")[3])
+                if not self._owned_book(book_id):
+                    raise LookupError("کتاب پیدا نشد.")
                 tags = book_shelves.set_tags(db, _library_user_id(self._session_token()), book_id, body.get("tags"))
                 self._json({"ok": True, "tags": tags}); return
             except LookupError as exc: self._json({"error": str(exc)}, 404); return
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400); return
         if path == "/api/account":
-            try: self._json(update_account(body))
+            try: self._json(update_account(body, self._user_id()))
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400)
             return
         if path == "/api/provider-config":
+            if not self._is_admin():
+                self._json({"error": "تنظیمات Provider در سطح پلتفرم مدیریت می‌شود."}, 403); return
             try:
                 candidate, default_model = _candidate_provider_config(body)
                 verification = _verify_provider_config(candidate, default_model)
@@ -2034,22 +2418,37 @@ class Handler(BaseHTTPRequestHandler):
             if "reading_glossary" in clean: clean["reading_glossary"] = bool(clean["reading_glossary"])
             if "reading_bookmarks" in clean: clean["reading_bookmarks"] = reader_clean_bookmarks(clean["reading_bookmarks"])
             if "reading_mode" in clean and clean["reading_mode"] not in {"translation", "bilingual", "columns", "original"}: clean["reading_mode"] = "translation"
-            for key, value in clean.items(): db.execute("INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at", (key, json.dumps(value, ensure_ascii=False), now()))
-            self._json({"ok": True, "value": reading_settings()}); return
+            for key, value in clean.items(): db.execute("INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at", (reading_setting_key(self._user_id(), key), json.dumps(value, ensure_ascii=False), now()))
+            self._json({"ok": True, "value": reading_settings(self._user_id())}); return
         if path == "/api/settings":
+            if not self._is_admin():
+                self._json({"error": "تنظیمات سراسری فقط برای مدیر سرور است."}, 403); return
             for key, value in body.items(): db.execute("INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at", (str(key), json.dumps(value, ensure_ascii=False), now()))
             self._json({"ok": True}); return
         if path.startswith("/api/library/") and path.count("/") == 3:
             book_id = path.rsplit("/", 1)[-1]
+            if not self._owned_book(book_id):
+                self._json({"error": "Book not found."}, 404); return
             title = str(body.get("title", "")).strip()
             if not title: self._json({"error": "Title is required."}, 400); return
-            db.execute("UPDATE library_books SET title=?, author=COALESCE(?, author), description=COALESCE(?, description), updated_at=? WHERE id=?", (title, body.get("author"), body.get("description"), now(), book_id)); self._json({"ok": True}); return
+            db.execute("UPDATE library_books SET title=?, author=COALESCE(?, author), description=COALESCE(?, description), updated_at=? WHERE id=? AND user_id=?", (title, body.get("author"), body.get("description"), now(), book_id, self._user_id())); self._json({"ok": True}); return
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0:2] == ["api", "glossaries"]:
-            gid = parts[2]; db.execute("UPDATE glossaries SET name=COALESCE(NULLIF(?, ''), name), description=COALESCE(?, description), updated_at=? WHERE id=?", (str(body.get("name", "")), body.get("description"), now(), gid)); self._json({"ok": True}); return
+            gid = parts[2]
+            if not db.fetch_one("SELECT id FROM glossaries WHERE id=? AND user_id=?", (gid, self._user_id())):
+                self._json({"error": "Glossary not found."}, 404); return
+            db.execute("UPDATE glossaries SET name=COALESCE(NULLIF(?, ''), name), description=COALESCE(?, description), updated_at=? WHERE id=? AND user_id=?", (str(body.get("name", "")), body.get("description"), now(), gid, self._user_id())); self._json({"ok": True}); return
         if len(parts) == 3 and parts[0:2] == ["api", "profiles"]:
-            pid = parts[2]; db.execute("UPDATE translation_profiles SET name=COALESCE(NULLIF(?, ''), name), system_prompt=COALESCE(NULLIF(?, ''), system_prompt), temperature=COALESCE(?, temperature), preserve_html=COALESCE(?, preserve_html), preserve_quotes=COALESCE(?, preserve_quotes), glossary_id=?, updated_at=? WHERE id=?", (str(body.get("name", "")), str(body.get("system_prompt", "")), body.get("temperature"), body.get("preserve_html"), body.get("preserve_quotes"), body.get("glossary_id"), now(), pid)); self._json({"ok": True}); return
+            pid = parts[2]
+            if not db.fetch_one("SELECT id FROM translation_profiles WHERE id=? AND user_id=?", (pid, self._user_id())):
+                self._json({"error": "Profile not found."}, 404); return
+            glossary_id = body.get("glossary_id")
+            if glossary_id is not None and not db.fetch_one("SELECT id FROM glossaries WHERE id=? AND user_id=?", (glossary_id, self._user_id())):
+                self._json({"error": "Glossary not found."}, 404); return
+            db.execute("UPDATE translation_profiles SET name=COALESCE(NULLIF(?, ''), name), system_prompt=COALESCE(NULLIF(?, ''), system_prompt), temperature=COALESCE(?, temperature), preserve_html=COALESCE(?, preserve_html), preserve_quotes=COALESCE(?, preserve_quotes), glossary_id=?, updated_at=? WHERE id=? AND user_id=?", (str(body.get("name", "")), str(body.get("system_prompt", "")), body.get("temperature"), body.get("preserve_html"), body.get("preserve_quotes"), glossary_id, now(), pid, self._user_id())); self._json({"ok": True}); return
         if len(parts) == 3 and parts[0:2] == ["api", "providers"]:
+            if not self._is_admin():
+                self._json({"error": "تنظیمات Provider در سطح پلتفرم مدیریت می‌شود."}, 403); return
             # Kept for backward compatibility, but writes go through the
             # same config.yaml path as /api/provider-config so this can
             # never diverge into a second base URL.
@@ -2070,14 +2469,17 @@ class Handler(BaseHTTPRequestHandler):
             with JOBS_LOCK: JOBS.pop(job.id, None)
             meta = JOB_META_DIR / f"{job.id}.json"
             if meta.exists(): meta.unlink()
-            db.execute("DELETE FROM jobs WHERE id=?", (job.id,)); self._json({"ok": True}); return
+            db.execute("DELETE FROM jobs WHERE id=? AND user_id=?", (job.id, int(job.user_id))); self._json({"ok": True}); return
         if len(parts) == 3 and parts[0:2] == ["api", "library"]:
             book_id = parts[2]
-            files = db.fetch_all("SELECT path FROM files WHERE book_id=?", (book_id,))
-            active = db.fetch_one("SELECT j.id FROM jobs j JOIN files f ON f.job_id=j.id WHERE f.book_id=? AND j.status IN ('queued','running') LIMIT 1", (book_id,))
+            if not self._owned_book(book_id):
+                self._json({"error": "Book not found."}, 404); return
+            uid = self._user_id()
+            files = db.fetch_all("SELECT path FROM files WHERE book_id=? AND user_id=?", (book_id, uid))
+            active = db.fetch_one("SELECT j.id FROM jobs j JOIN files f ON f.job_id=j.id WHERE f.book_id=? AND f.user_id=? AND j.status IN ('queued','running') LIMIT 1", (book_id, uid))
             if active: self._json({"error": "این کتاب در حال ترجمه است و فعلاً قابل حذف نیست."}, 409); return
-            db.execute("DELETE FROM files WHERE book_id=?", (book_id,)); db.execute("DELETE FROM library_books WHERE id=?", (book_id,))
-            # Keep deletion scoped to files belonging to this library book.
+            db.execute("DELETE FROM files WHERE book_id=? AND user_id=?", (book_id, uid)); db.execute("DELETE FROM library_books WHERE id=? AND user_id=?", (book_id, uid))
+            # Keep deletion scoped to this library book.
             for item in files:
                 file_path = Path(item["path"])
                 if file_path.is_file() and (UPLOAD_DIR in file_path.parents or WEB_OUTPUT_DIR in file_path.parents):
@@ -2086,14 +2488,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True}); return
         table_map = {"glossaries": "glossaries", "memory": "translation_memory", "profiles": "translation_profiles"}
         if len(parts) == 3 and parts[0] == "api" and parts[1] in table_map:
-            db.execute(f"DELETE FROM {table_map[parts[1]]} WHERE id=?", (parts[2],)); self._json({"ok": True}); return
+            db.execute(f"DELETE FROM {table_map[parts[1]]} WHERE id=? AND user_id=?", (parts[2], self._user_id())); self._json({"ok": True}); return
         self.send_error(404)
 
 
 def main() -> None:
     restore_jobs()
-    print("KALIMA UI: http://127.0.0.1:8765")
-    ThreadingHTTPServer(("127.0.0.1",8765),Handler).serve_forever()
+    host = (os.environ.get("KALIMA_HOST") or "127.0.0.1").strip()
+    try:
+        port = int(os.environ.get("KALIMA_PORT") or 8765)
+    except ValueError:
+        port = 8765
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        # Binding a public interface is now a deliberate deployment choice;
+        # put a TLS reverse proxy in front of it (LAUNCH.md Phase A).
+        print("KALIMA: non-loopback bind requested. Use a TLS reverse proxy and set KALIMA_ALLOWED_HOSTS.")
+    print(f"KALIMA UI: http://{host}:{port}")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__": main()

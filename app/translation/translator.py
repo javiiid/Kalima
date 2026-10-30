@@ -515,6 +515,7 @@ def _remember_chunk(
     translated_text: str,
     from_lang: str,
     to_lang: str,
+    user_id: int = 1,
 ) -> None:
     """Write one engine-produced pair back to memory. Never raises."""
     if memory_db is False:
@@ -526,7 +527,8 @@ def _remember_chunk(
             # Same call-time resolution as the lookup above.
             from app.storage.database import db as database
         _memory_store(
-            database, source_text, translated_text, from_lang, to_lang
+            database, source_text, translated_text, from_lang, to_lang,
+            user_id=int(user_id or 1),
         )
     except Exception:
         pass
@@ -550,6 +552,7 @@ def translate_chunk(
     fallback_record: list | None = None,
     memory_db: Any = None,
     memory_record: list | None = None,
+    user_id: int = 1,
 ) -> str:
     """
     Translate one chunk.
@@ -562,7 +565,8 @@ def translate_chunk(
     bypasses the memory entirely (no read, no write) -- for callers that
     must pay for a fresh translation, like payload-shape tests.
     ``memory_record`` collects the ids served from memory, mirroring
-    ``fallback_record``.
+    ``fallback_record``. ``user_id`` scopes the memory read/write (Phase 1):
+    one account never reads or overwrites another account's pairs.
 
     ``context_before`` is the plain text of the preceding chunks, supplied by the
     semantic chunker. It is sent to the model so pronouns and recurring names
@@ -657,7 +661,7 @@ def translate_chunk(
             from app.storage.database import db as database
 
         remembered = _memory_lookup(
-            database, text, from_lang, to_lang
+            database, text, from_lang, to_lang, int(user_id or 1)
         )
 
         if remembered is not None:
@@ -805,7 +809,8 @@ def translate_chunk(
             translated_text = attempt(model)
 
             _remember_chunk(
-                memory_db, text, translated_text, from_lang, to_lang
+                memory_db, text, translated_text, from_lang, to_lang,
+                int(user_id or 1),
             )
 
             return translated_text
@@ -825,7 +830,8 @@ def translate_chunk(
             translated_text = attempt(fallback_model)
 
             _remember_chunk(
-                memory_db, text, translated_text, from_lang, to_lang
+                memory_db, text, translated_text, from_lang, to_lang,
+                int(user_id or 1),
             )
 
             if fallback_record is not None:
@@ -963,6 +969,7 @@ def _process_fast_resume_sequential(
     chunk_contexts: dict[str, str] | None = None,
     fallback_model: str | None = None,
     fallback_record: list | None = None,
+    user_id: int = 1,
 ) -> tuple[dict[str, Any], None, None]:
     """
     Sequential path. Taken when concurrency is 1, when resuming, or for tests.
@@ -1122,6 +1129,7 @@ def _process_fast_resume_sequential(
                 fallback_model=fallback_model,
                 fallback_record=fallback_record,
                 memory_record=memory_hits,
+                user_id=int(user_id or 1),
             )
 
             # ------------------------------------------------
@@ -1414,6 +1422,7 @@ def _process_fast_resume(
     chunk_contexts: dict[str, str] | None = None,
     fallback_model: str | None = None,
     fallback_record: list | None = None,
+    user_id: int = 1,
 ) -> tuple[dict[str, Any], None, None]:
     """Translate chunks concurrently while persisting each completed result."""
     max_workers = _translation_concurrency()
@@ -1435,6 +1444,7 @@ def _process_fast_resume(
             paths, model, test_translations, filetype, system_prompt_text,
             stop_event, style_preset, chunk_contexts,
             fallback_model, fallback_record,
+            user_id=int(user_id or 1),
         )
 
     total_chunks = len(all_chunks)
@@ -1467,6 +1477,7 @@ def _process_fast_resume(
             fallback_model=fallback_model,
             fallback_record=fallback_record,
             memory_record=memory_hits,
+            user_id=int(user_id or 1),
         )
         translated_text = _clean_translation(translated_text, chunk_text)
         if not translated_text:
@@ -1686,6 +1697,7 @@ def process_translations(
     style_preset: str | None = None,
     chunk_contexts: dict[str, str] | None = None,
     fallback_model: str | None = None,
+    user_id: int = 1,
 ) -> tuple[dict[str, Any], Any, Any]:
     """
     Main translation workflow dispatcher.
@@ -1716,6 +1728,9 @@ def process_translations(
     ``fallback_model`` names a cheaper model used only after the primary model
     exhausts all retries on a chunk. Chunks served by the fallback are recorded
     in the job directory (``fallback.json``) and reported at the end of the run.
+
+    ``user_id`` scopes the translation memory (Phase 1) so one account never
+    reads or overwrites another account's pairs.
     """
 
     # Signature used to default to "gpt-5.6-terra"; resolve from config instead.
@@ -1819,6 +1834,7 @@ def process_translations(
             chunk_contexts=chunk_contexts,
             fallback_model=fallback_model,
             fallback_record=fallback_record,
+            user_id=int(user_id or 1),
         )
 
         if fallback_model:

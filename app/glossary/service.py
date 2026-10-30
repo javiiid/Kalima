@@ -12,16 +12,25 @@ def language(value):
     return value.upper()
 
 
-def get_glossary(database, book_id, source, target):
-    source, target = language(source), language(target)
-    if not database.fetch_one('SELECT id FROM library_books WHERE id=?', (book_id,)):
+def _book_owner(database, book_id, user_id=None):
+    book = database.fetch_one('SELECT id, user_id FROM library_books WHERE id=?', (book_id,))
+    if not book:
         raise LookupError('کتاب پیدا نشد.')
-    row = database.fetch_one('SELECT * FROM book_glossaries WHERE book_id=? AND source_language=? AND target_language=?', (book_id, source, target))
+    owner = int(book['user_id'] or 1)
+    if user_id is not None and int(user_id) != owner:
+        raise LookupError('کتاب پیدا نشد.')
+    return owner
+
+
+def get_glossary(database, book_id, source, target, user_id=None):
+    source, target = language(source), language(target)
+    owner = _book_owner(database, book_id, user_id)
+    row = database.fetch_one('SELECT * FROM book_glossaries WHERE book_id=? AND user_id=? AND source_language=? AND target_language=?', (book_id, owner, source, target))
     return dict(book_id=int(book_id), source_language=source, target_language=target,
                 version=row['version'] if row else 0, terms=json.loads(row['terms_json']) if row else [])
 
 
-def save_glossary(database, book_id, body):
+def save_glossary(database, book_id, body, user_id=None):
     source, target = language(body.get('source_language')), language(body.get('target_language'))
     terms = body.get('terms')
     version = body.get('version')
@@ -45,19 +54,23 @@ def save_glossary(database, book_id, body):
             entry['origin'] = 'automatic'
         cleaned.append(entry)
     with database._lock, database.connect() as connection:
-        if not connection.execute('SELECT id FROM library_books WHERE id=?', (book_id,)).fetchone():
+        book = connection.execute('SELECT user_id FROM library_books WHERE id=?', (book_id,)).fetchone()
+        if not book:
             raise LookupError('کتاب پیدا نشد.')
-        connection.execute('INSERT OR IGNORE INTO book_glossaries(book_id,source_language,target_language) VALUES (?,?,?)', (book_id, source, target))
-        changed = connection.execute('UPDATE book_glossaries SET terms_json=?,version=version+1 WHERE book_id=? AND source_language=? AND target_language=? AND version=?', (json.dumps(cleaned, ensure_ascii=False), book_id, source, target, version))
+        owner = int(book['user_id'] or 1)
+        if user_id is not None and int(user_id) != owner:
+            raise LookupError('کتاب پیدا نشد.')
+        connection.execute('INSERT OR IGNORE INTO book_glossaries(user_id,book_id,source_language,target_language) VALUES (?,?,?,?)', (owner, book_id, source, target))
+        changed = connection.execute('UPDATE book_glossaries SET terms_json=?,version=version+1 WHERE book_id=? AND user_id=? AND source_language=? AND target_language=? AND version=?', (json.dumps(cleaned, ensure_ascii=False), book_id, owner, source, target, version))
         if changed.rowcount != 1:
             raise ValueError('واژه‌نامه تغییر کرده؛ دوباره بارگذاری کنید.')
-    return get_glossary(database, book_id, source, target)
+    return get_glossary(database, book_id, source, target, owner)
 
 
 PROPOSAL_ORIGINS = ('preflight', 'postrun')
 
 
-def save_proposal(database, book_id, source, target, terms, origin='preflight'):
+def save_proposal(database, book_id, source, target, terms, origin='preflight', user_id=None):
     """Persist a draft for the user to review. Nothing here is live yet.
 
     Drafts deliberately live in their own table rather than in
@@ -86,28 +99,31 @@ def save_proposal(database, book_id, source, target, terms, origin='preflight'):
         entry['origin'] = 'proposed'
         cleaned.append(entry)
     with database._lock, database.connect() as connection:
-        if not connection.execute('SELECT id FROM library_books WHERE id=?', (book_id,)).fetchone():
+        book = connection.execute('SELECT user_id FROM library_books WHERE id=?', (book_id,)).fetchone()
+        if not book:
+            raise LookupError('کتاب پیدا نشد.')
+        owner = int(book['user_id'] or 1)
+        if user_id is not None and int(user_id) != owner:
             raise LookupError('کتاب پیدا نشد.')
         connection.execute(
             'INSERT OR REPLACE INTO book_glossary_proposals'
-            '(book_id,source_language,target_language,origin,terms_json,created_at)'
-            ' VALUES (?,?,?,?,?,?)',
-            (book_id, source, target, origin, json.dumps(cleaned, ensure_ascii=False),
+            '(user_id,book_id,source_language,target_language,origin,terms_json,created_at)'
+            ' VALUES (?,?,?,?,?,?,?)',
+            (owner, book_id, source, target, origin, json.dumps(cleaned, ensure_ascii=False),
              datetime.now(timezone.utc).isoformat()),
         )
-    return get_proposal(database, book_id, source, target, origin)
+    return get_proposal(database, book_id, source, target, origin, owner)
 
 
-def get_proposal(database, book_id, source, target, origin='preflight'):
+def get_proposal(database, book_id, source, target, origin='preflight', user_id=None):
     source, target, origin = language(source), language(target), origin
     if origin not in PROPOSAL_ORIGINS:
         raise ValueError('نوع پیشنهاد نامعتبر است.')
-    if not database.fetch_one('SELECT id FROM library_books WHERE id=?', (book_id,)):
-        raise LookupError('کتاب پیدا نشد.')
+    owner = _book_owner(database, book_id, user_id)
     row = database.fetch_one(
         'SELECT terms_json, created_at FROM book_glossary_proposals'
-        ' WHERE book_id=? AND source_language=? AND target_language=? AND origin=?',
-        (book_id, source, target, origin),
+        ' WHERE book_id=? AND user_id=? AND source_language=? AND target_language=? AND origin=?',
+        (book_id, owner, source, target, origin),
     )
     return {
         'book_id': int(book_id),
@@ -119,12 +135,13 @@ def get_proposal(database, book_id, source, target, origin='preflight'):
     }
 
 
-def clear_proposal(database, book_id, source, target, origin='preflight'):
+def clear_proposal(database, book_id, source, target, origin='preflight', user_id=None):
     source, target = language(source), language(target)
+    owner = _book_owner(database, book_id, user_id)
     return database.execute(
         'DELETE FROM book_glossary_proposals'
-        ' WHERE book_id=? AND source_language=? AND target_language=? AND origin=?',
-        (book_id, source, target, origin),
+        ' WHERE book_id=? AND user_id=? AND source_language=? AND target_language=? AND origin=?',
+        (book_id, owner, source, target, origin),
     )
 
 

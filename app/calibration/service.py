@@ -56,8 +56,9 @@ def validate_fallback_model(fallback_model, final_model):
 
 
 class CalibrationService:
-    def __init__(self, database, root, client_factory=None):
-        self.store = Store(database)
+    def __init__(self, database, root, client_factory=None, user_id: int = 1):
+        self.user_id = int(user_id or 1)
+        self.store = Store(database, self.user_id)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.client_factory = client_factory or self._client
@@ -80,7 +81,7 @@ class CalibrationService:
                 except LookupError:
                     pass
                 self.store.change(session["id"], lambda s: s.update(busy=None))
-        self.store.database.execute("UPDATE calibration_attempts SET status='uncertain' WHERE status='dispatching'")
+        self.store.database.execute("UPDATE calibration_attempts SET status='uncertain' WHERE user_id=? AND status='dispatching'", (self.user_id,))
 
     def create(self, source, filename, body):
         source = Path(source)
@@ -107,6 +108,7 @@ class CalibrationService:
         document = prepare(source, self.root / identifier, profile["from_lang"])
         timestamp = now()
         session = {"id": identifier, "revision": 0, "state": "AWAITING_USER_CALIBRATION", "filename": filename,
+                   "user_id": self.user_id,
                    "profile": profile, "document": document, "selected": document.pop("selected"), "results": {},
                    "approvals": {}, "approved": None, "busy": None, "job_id": None, "outputs": outputs,
                    "created_at": timestamp, "updated_at": timestamp, "generation_counts": {},
@@ -266,6 +268,11 @@ class CalibrationService:
     def call(self, session, request, phase):
         if self.client_factory == self._client and session["profile"]["provider"] != provider_identity():
             raise Conflict("ارائه‌دهنده تغییر کرده است؛ کتاب را با تنظیمات جدید باز کنید.")
+        # Pre-dispatch ledger guard (Phase 1): the account must hold at least
+        # one credit before a paid provider call leaves. The per-book token/cost
+        # cap below is a second, independent guard -- both must pass.
+        from app.account import billing as account_billing
+        account_billing.check_credit(self.user_id, 1)
         reserved = token_reservation(request)
         rate, provenance = self.rates(request["model"])
         # Unknown/indicative rates are allowed under an explicitly shown token cap.
@@ -287,6 +294,15 @@ class CalibrationService:
         else:
             tokens, cost = reserved, reservation_cost
         self.store.settle(attempt, tokens, cost, {"input": incoming, "output": outgoing, "measured": incoming is not None, "provider_request": getattr(response, "id", None)})
+        # Record what the call actually cost against the user's ledger. The
+        # provider has already been paid, so this must never raise.
+        try:
+            account_billing.spend_usd(
+                self.user_id, cost / 1_000_000, "calibration",
+                str(session.get("id", "")), minimum_credits=1, require_positive=False,
+            )
+        except Exception:
+            pass
         if not response.choices or response.choices[0].finish_reason not in (None, "stop"):
             raise ValueError("پاسخ مدل کامل نشد؛ نمونه را کوتاه‌تر کنید یا دوباره تلاش کنید.")
         return parse_json(response.choices[0].message.content)

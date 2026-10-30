@@ -206,6 +206,7 @@ def _translate_epub(
     on_job_started=None,
     style_preset=None,
     fallback_model=None,
+    user_id=1,
 ):
     """
     Execute the complete EPUB translation pipeline.
@@ -515,6 +516,7 @@ def _translate_epub(
                 style_preset=style_preset,
                 chunk_contexts=chunk_contexts,
                 fallback_model=fallback_model,
+                user_id=int(user_id or 1),
             )
         )
 
@@ -886,6 +888,7 @@ def _translate_pdf(
                 stop_event=stop_event,
                 style_preset=style_preset,
                 fallback_model=fallback_model,
+                user_id=int(user_id or 1),
             )
         )
 
@@ -1134,6 +1137,9 @@ def translate(
     translation_prompt:
         Custom/default translation prompt generated
         by app.translation.prompts.
+
+    user_id:
+        Owner of the job; scopes the translation memory (Phase 1).
     """
 
     # ========================================================

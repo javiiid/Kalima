@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 import { api } from '@/lib/api'
-import type { Chapter, ChapterBlock, ChapterContent, ReadingSettings } from '@/lib/api'
+import type {
+  Bookmark,
+  Chapter,
+  ChapterBlock,
+  ChapterContent,
+  ReadingSettings,
+  ReadingTheme,
+} from '@/lib/api'
 import { stripDuplicatedHeading, stripLeadingTitle } from '@/lib/chunks'
 import {
   MAX_GLOSS_MARKS,
@@ -17,21 +24,30 @@ import {
   DIRECTION_OPTIONS,
   LINE_HEIGHT_FALLBACK,
   LINE_HEIGHT_OPTIONS,
+  NOTE_MAX,
   READER_MODES,
+  READING_THEMES,
   WIDTH_FALLBACK,
   WIDTH_OPTIONS,
+  bookmarksFor,
   clampFontSize,
   clampLineHeight,
   clampWidth,
   directionFor,
+  hasBookmark,
   isDirection,
   locationKey,
   overallPercent,
   pairedBlocks,
   readKey,
+  removeBookmark,
+  setBookmarkNote,
   storedChapter,
   syncTop,
+  themeForStored,
+  themePatch,
   toReaderMode,
+  toggleBookmark,
   type ReaderMode,
 } from '@/lib/reading.ts'
 import { fa } from '@/lib/format'
@@ -68,6 +84,13 @@ const DIRECTION_KEY: Record<string, StringKey> = {
   auto: 'reader.direction.auto',
   rtl: 'reader.direction.rtl',
   ltr: 'reader.direction.ltr',
+}
+
+const THEME_KEY: Record<ReadingTheme, StringKey> = {
+  light: 'reader.theme.light',
+  sepia: 'reader.theme.sepia',
+  night: 'reader.theme.night',
+  contrast: 'reader.theme.contrast',
 }
 
 /**
@@ -187,6 +210,66 @@ function applyGlossMarks(
   return count
 }
 
+/**
+ * DOM helpers for marks and read-aloud. They touch `document` (measurement,
+ * `speechSynthesis`) and are therefore exercised by hand, like the glossary
+ * walk above; the persistable decisions live tested in `lib/reading.ts`.
+ *
+ * Mirrors `blockTargets()` / `currentBlockIndex()` in `app/reader/page.py`:
+ * the translation column in columns mode, the paired blocks in bilingual
+ * mode, else the top-level nodes of the single-language body.
+ */
+function blockTargets(root: HTMLElement, mode: ReaderMode): HTMLElement[] {
+  if (mode === 'columns') {
+    const column = root.querySelectorAll<HTMLElement>('[data-col="translation"] [data-block-index]')
+    if (column.length) return Array.from(column)
+  }
+  const paired = root.querySelectorAll<HTMLElement>('[data-block-index]')
+  if (paired.length) return Array.from(paired)
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-reader-body] > *')).filter((element) =>
+    Boolean(element.textContent?.trim()),
+  )
+}
+
+/**
+ * The block nearest the top of the viewport, mirroring `currentBlockIndex()`:
+ * the first target that has not scrolled past, else the last one.
+ */
+function currentBlockIndex(root: HTMLElement, mode: ReaderMode): number {
+  const elements = blockTargets(root, mode)
+  for (let index = 0; index < elements.length; index++) {
+    if ((elements[index] as HTMLElement).getBoundingClientRect().top >= 0) return index
+  }
+  return Math.max(0, elements.length - 1)
+}
+
+/**
+ * The Persian voice, or null. Mirrors `faVoice()` in the Python reader:
+ * a voice whose language starts with `fa` (`fa`, `fa-IR`), never a fallback
+ * voice that would read Persian text with English phonemes.
+ */
+function faVoice(): SpeechSynthesisVoice | null {
+  try {
+    const voices = window.speechSynthesis?.getVoices() ?? []
+    return voices.find((voice) => voice.lang.toLowerCase().startsWith('fa')) ?? null
+  } catch {
+    return null
+  }
+}
+
+/** A transient note, matching the monitor page's toast. */
+function Toast({ message, onDone }: { message: string; onDone: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onDone, 3000)
+    return () => window.clearTimeout(timer)
+  }, [message, onDone])
+  return (
+    <div role="status" aria-live="polite" className="toast toast-ok">
+      {message}
+    </div>
+  )
+}
+
 export function ReaderPage() {
   const { id = '' } = useParams()
   const { t, dir } = useLanguage()
@@ -202,6 +285,14 @@ export function ReaderPage() {
   const [widthOverride, setWidthOverride] = useState<number | null>(null)
   const [directionOverride, setDirectionOverride] = useState<string | null>(null)
   const [glossOverride, setGlossOverride] = useState<boolean | null>(null)
+  const [themeOverride, setThemeOverride] = useState<ReadingTheme | null>(null)
+  // The whole list (every book), so a save sends back what it kept; the marks
+  // shown are filtered to this book by `bookmarksFor`.
+  const [marksOverride, setMarksOverride] = useState<Bookmark[] | null>(null)
+  const [speaking, setSpeaking] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+  const [jumpTo, setJumpTo] = useState<{ chapter: number; block: number } | null>(null)
+  const speakRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const settings = useQuery({
@@ -219,6 +310,10 @@ export function ReaderPage() {
   // The toggle is persisted from this step on; highlighting itself lands
   // with the glossary step, which reads this same value.
   const glossary = glossOverride ?? server?.reading_glossary ?? true
+  // The reader surface theme, separate from the app's day/dark mode.
+  const theme = themeOverride ?? themeForStored(server)
+  const allMarks = marksOverride ?? server?.reading_bookmarks ?? []
+  const marks = useMemo(() => bookmarksFor(allMarks, id), [allMarks, id])
 
   const chapters = useQuery({
     queryKey: ['reader-chapters', id],
@@ -298,6 +393,131 @@ export function ReaderPage() {
     void save.mutate({ reading_last_location: { job_id: id, chapter: next } })
   }
 
+  /** Persist the whole mark list (the server re-clamps and caps it). */
+  const saveMarks = (next: Bookmark[]) => {
+    setMarksOverride(next)
+    void save.mutate({ reading_bookmarks: next })
+  }
+
+  /**
+   * Toggle a mark on the block at the top of the viewport, mirroring the
+   * Python `#mark-btn`: the same spot removes it, anywhere else adds it.
+   */
+  const toggleMark = () => {
+    const root = scrollRef.current
+    if (!root || chapterId === null) return
+    const block = currentBlockIndex(root, mode)
+    const entry: Bookmark = {
+      chapter: chapterId,
+      block,
+      note: '',
+      created: new Date().toISOString(),
+      job: id,
+    }
+    const wasMarked = hasBookmark(allMarks, id, chapterId, block)
+    saveMarks(toggleBookmark(allMarks, entry))
+    setToast(wasMarked ? t('reader.mark.removed') : t('reader.mark.saved'))
+  }
+
+  /** Jump to a mark, switching chapter first when it lives in another one. */
+  const jumpMark = (mark: Bookmark) => {
+    if (mark.chapter !== chapterId) openChapter(mark.chapter)
+    setJumpTo({ chapter: mark.chapter, block: mark.block })
+  }
+
+  /** Update a mark's note locally (persisted on blur, like the Python change). */
+  const editNote = (mark: Bookmark, note: string) => {
+    setMarksOverride(setBookmarkNote(allMarks, id, mark.chapter, mark.block, note))
+  }
+
+  const commitNote = (mark: Bookmark, note: string) => {
+    saveMarks(setBookmarkNote(allMarks, id, mark.chapter, mark.block, note))
+  }
+
+  const deleteMark = (mark: Bookmark) => {
+    saveMarks(removeBookmark(allMarks, id, mark.chapter, mark.block))
+    setToast(t('reader.mark.removed'))
+  }
+
+  /** Stop read-aloud and clear the highlight, mirroring `stopSpeak()`. */
+  const stopSpeech = () => {
+    speakRef.current = false
+    setSpeaking(false)
+    try {
+      window.speechSynthesis?.cancel()
+    } catch {
+      // A browser without speech support has nothing to cancel.
+    }
+    scrollRef.current
+      ?.querySelectorAll('.speaking')
+      .forEach((element) => element.classList.remove('speaking'))
+  }
+
+  /**
+   * Read one block, resolving when it finishes. Mirrors `speakOne()`: the
+   * Persian voice, `onend`/`onerror` both resolve so a failed block never
+   * wedges the queue.
+   */
+  const speakOne = (element: HTMLElement, text: string) =>
+    new Promise<void>((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text)
+      const voice = faVoice()
+      if (voice) {
+        utterance.voice = voice
+        utterance.lang = voice.lang
+      } else {
+        utterance.lang = 'fa-IR'
+      }
+      utterance.onend = () => resolve()
+      utterance.onerror = () => resolve()
+      element.classList.add('speaking')
+      window.speechSynthesis.speak(utterance)
+    }).then(() => {
+      element.classList.remove('speaking')
+    })
+
+  /**
+   * Read the chapter aloud, block by block from the current position. Mirrors
+   * `toggleSpeak()`: nothing is read when the browser has no speech or no
+   * Persian voice, rather than reading Persian in an English voice.
+   */
+  const toggleSpeech = async () => {
+    if (speakRef.current) {
+      stopSpeech()
+      return
+    }
+    if (!('speechSynthesis' in window)) {
+      setToast(t('reader.speak.unsupported'))
+      return
+    }
+    if (!faVoice()) {
+      setToast(t('reader.speak.noVoice'))
+      return
+    }
+    const root = scrollRef.current
+    if (!root) return
+    const elements = blockTargets(root, mode)
+    if (elements.length === 0) return
+    const start = currentBlockIndex(root, mode)
+    speakRef.current = true
+    setSpeaking(true)
+    for (let index = start; index < elements.length && speakRef.current; index++) {
+      const element = elements[index] as HTMLElement
+      const sides = element.querySelectorAll('.parallel-side')
+      const raw = sides.length
+        ? (sides[sides.length - 1] as HTMLElement).textContent
+        : element.textContent
+      const text = String(raw ?? '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 600)
+      if (!text) continue
+      element.scrollIntoView({ block: 'center' })
+      await speakOne(element, text)
+    }
+    stopSpeech()
+  }
+
   // Track the scroll fraction (rAF-throttled) and persist it debounced,
   // mirroring the Python reader's 500ms saveLoc.
   useEffect(() => {
@@ -351,17 +571,61 @@ export function ReaderPage() {
     applyGlossMarks(root, terms, mode, t('reader.glossary'))
   }, [content.data, blocks.data, mode, chapterId, terms, glossary, t])
 
+  // Scroll a jumped-to mark into view once its chapter has rendered. The
+  // chapter switch and the scroll are one intent, so the pending target is
+  // left alone until the right chapter's DOM exists.
+  useEffect(() => {
+    if (!jumpTo || chapterId !== jumpTo.chapter || !content.data) return
+    const root = scrollRef.current
+    if (!root) return
+    const timer = window.setTimeout(() => {
+      const elements = blockTargets(root, mode)
+      const element = elements[Math.min(jumpTo.block, elements.length - 1)]
+      element?.scrollIntoView({ block: 'center' })
+      setJumpTo(null)
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [jumpTo, chapterId, content.data, mode])
+
+  // Read-aloud is per chapter: switching chapters stops it, mirroring
+  // `stopSpeak()` at the top of the Python `loadChapter`.
+  useEffect(() => {
+    speakRef.current = false
+    setSpeaking(false)
+    try {
+      window.speechSynthesis?.cancel()
+    } catch {
+      // Nothing to cancel on a browser without speech support.
+    }
+  }, [chapterId])
+
+  // Leaving the page must not keep reading.
+  useEffect(
+    () => () => {
+      speakRef.current = false
+      try {
+        window.speechSynthesis?.cancel()
+      } catch {
+        // Nothing to cancel on a browser without speech support.
+      }
+    },
+    [],
+  )
+
   const items = chapterItems
 
   return (
+    // The main carries `.page` literally (the gutter owner); the reader theme
+    // scope sits on the wrapper so only this page's subtree is restyled.
     <main className="page" dir={dir}>
-      <header className="mb-5">
-        <h1 className="text-[length:var(--text-h1)] font-extrabold tracking-tight">
-          {chapters.data?.book ?? t('reader.read')}
-        </h1>
-      </header>
+      <div className={`reader-theme-${theme}`}>
+        <header className="mb-5">
+          <h1 className="text-[length:var(--text-h1)] font-extrabold tracking-tight">
+            {chapters.data?.book ?? t('reader.read')}
+          </h1>
+        </header>
 
-      <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
+        <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
         {/* ---- chapter list ---- */}
         <nav className="surface-card h-fit p-3" aria-label={t('reader.chapters')}>
           <h2 className="px-2 py-1 text-[length:var(--text-label)] font-bold">{t('reader.chapters')}</h2>
@@ -512,7 +776,100 @@ export function ReaderPage() {
             >
               {t('reader.glossary')}: {glossary ? t('reader.glossary.on') : t('reader.glossary.off')}
             </button>
+
+            {/* The reader surface theme. Each swatch carries its own theme
+                scope so it previews its palette; the page carries the chosen
+                one. */}
+            <div className="flex items-center gap-2">
+              <span className="label">{t('reader.theme')}</span>
+              <div className="flex gap-1" role="group" aria-label={t('reader.theme')}>
+                {READING_THEMES.map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`reader-swatch reader-theme-${value}`}
+                    aria-pressed={theme === value}
+                    aria-label={t(THEME_KEY[value])}
+                    title={t(THEME_KEY[value])}
+                    onClick={() => {
+                      setThemeOverride(value)
+                      void save.mutate(themePatch(value))
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <button type="button" className="btn btn-ghost" onClick={toggleMark}>
+              {t('reader.mark.add')}
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-ghost"
+              aria-pressed={speaking}
+              onClick={() => void toggleSpeech()}
+            >
+              {speaking ? t('reader.speak.stop') : t('reader.speak')}
+            </button>
           </div>
+
+          {/* Bookmarks and their notes, mirroring the Python `#marks-list`.
+              Marks are stored per user but shown per book, so a mark made in
+              another book never lands on the same paragraph number here. */}
+          <section className="surface-card p-3" aria-label={t('reader.marks.title')}>
+            <h2 className="px-1 pb-2 text-[length:var(--text-label)] font-bold">
+              {t('reader.marks.title')}
+            </h2>
+            {marks.length === 0 ? (
+              <p className="empty">{t('reader.marks.empty')}</p>
+            ) : (
+              <ul className="grid gap-1">
+                {marks.map((mark) => {
+                  const chapter = items.find((item) => item.id === mark.chapter)
+                  const label =
+                    chapter?.title ??
+                    t('reader.chapterFallback', { index: fa(mark.chapter + 1) })
+                  return (
+                    <li
+                      key={`${mark.chapter}:${mark.block}`}
+                      className="flex flex-wrap items-center gap-2"
+                    >
+                      <button
+                        type="button"
+                        className="btn btn-ghost min-w-0 flex-none"
+                        title={t('reader.mark.goto')}
+                        onClick={() => jumpMark(mark)}
+                      >
+                        {/* Wrap rather than truncate: an RTL title truncated by
+                            `text-overflow` loses its opening words, which are
+                            the ones that identify the chapter. */}
+                        <span className="block max-w-[14rem] break-words text-start">{label}</span>
+                      </button>
+                      <input
+                        className="field min-w-0 flex-1"
+                        maxLength={NOTE_MAX}
+                        placeholder={t('reader.mark.note')}
+                        value={mark.note}
+                        aria-label={t('reader.mark.noteLabel', { label })}
+                        onChange={(event) => editNote(mark, event.target.value)}
+                        onBlur={(event) => commitNote(mark, event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        aria-label={t('reader.mark.delete')}
+                        title={t('reader.mark.delete')}
+                        onClick={() => deleteMark(mark)}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </section>
 
           {/* Overall progress: the fraction through this chapter added to the
               chapters before it, mirroring the Python `#progress-fill`. */}
@@ -596,6 +953,9 @@ export function ReaderPage() {
             </div>
           ) : null}
         </section>
+        </div>
+
+        {toast ? <Toast message={toast} onDone={() => setToast(null)} /> : null}
       </div>
     </main>
   )
@@ -604,6 +964,7 @@ export function ReaderPage() {
 function ColumnSide({
   label,
   glossSide,
+  col,
   tone,
   htmlOf,
   blocks,
@@ -612,6 +973,7 @@ function ColumnSide({
 }: {
   label: string
   glossSide: GlossSide
+  col: 'original' | 'translation'
   tone: string
   htmlOf: (block: ChapterBlock) => string
   blocks: ChapterBlock[]
@@ -619,13 +981,14 @@ function ColumnSide({
   setRef: (element: HTMLElement | null) => void
 }) {
   return (
-    <section ref={setRef} className="reader-col" aria-label={label}>
+    <section ref={setRef} className="reader-col" data-col={col} aria-label={label}>
       <h3 className="reader-col-head">{label}</h3>
-      {blocks.map((block) => {
+      {blocks.map((block, index) => {
         const html = htmlOf(block)
         return (
           <div
             key={block.id}
+            data-block-index={index}
             dir={directionFor(html, direction)}
             data-gloss-side={glossSide}
             className="reader-col-block leading-8"
@@ -701,12 +1064,14 @@ function ColumnsView({
   const original = {
     label: t('reader.side.original'),
     glossSide: 'source' as const,
+    col: 'original' as const,
     tone: 'var(--color-text-secondary)',
     htmlOf: (block: ChapterBlock) => block.original_html,
   }
   const translation = {
     label: t('reader.side.translation'),
     glossSide: 'target' as const,
+    col: 'translation' as const,
     tone: 'var(--color-text-primary)',
     htmlOf: (block: ChapterBlock) => block.translation_html,
   }
@@ -728,6 +1093,7 @@ function ColumnsView({
         <ColumnSide
           label={first.label}
           glossSide={first.glossSide}
+          col={first.col}
           tone={first.tone}
           htmlOf={first.htmlOf}
           blocks={blocks}
@@ -739,6 +1105,7 @@ function ColumnsView({
         <ColumnSide
           label={second.label}
           glossSide={second.glossSide}
+          col={second.col}
           tone={second.tone}
           htmlOf={second.htmlOf}
           blocks={blocks}
@@ -783,8 +1150,12 @@ function ChapterBody({
     }
     return (
       <div className="grid gap-5">
-        {blocks.map((block) => (
-          <div key={block.id} className="grid gap-3 md:grid-cols-2">
+        {blocks.map((block, index) => (
+          <div
+            key={block.id}
+            data-block-index={index}
+            className="grid gap-3 md:grid-cols-2"
+          >
             {/* Both are sanitised server-side. See the note at the top. Both
                 also repeat the title as loose text and again in an <h1>, so
                 each side is stripped on its own: the original and the
@@ -801,7 +1172,7 @@ function ChapterBody({
               <div
                 dir={directionFor(block.original_html, direction)}
                 data-gloss-side="source"
-                className="leading-8"
+                className="parallel-side leading-8"
                 style={{ color: 'var(--color-text-secondary)' }}
                 dangerouslySetInnerHTML={{ __html: stripDuplicatedHeading(block.original_html) }}
               />
@@ -816,7 +1187,7 @@ function ChapterBody({
               <div
                 dir={directionFor(block.translation_html, direction)}
                 data-gloss-side="target"
-                className="leading-8"
+                className="parallel-side leading-8"
                 style={{ color: 'var(--color-text-primary)' }}
                 dangerouslySetInnerHTML={{ __html: stripDuplicatedHeading(block.translation_html) }}
               />
@@ -829,6 +1200,7 @@ function ChapterBody({
 
   return (
     <div
+      data-reader-body
       dir={directionFor(content.html, direction)}
       className="leading-8"
       style={{ color: 'var(--color-text-primary)' }}

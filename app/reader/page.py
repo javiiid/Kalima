@@ -518,10 +518,12 @@ $('#mark-btn').addEventListener('click',()=>{
   if(currentId===null)return;
   const bi=currentBlockIndex();
   const marks=settings.reading_bookmarks||[];
-  const at=marks.findIndex(m=>m.chapter===currentId&&m.block===bi);
+  // Marks are stored per user, and chapter/block numbers repeat across books,
+  // so both the toggle and the new row are scoped to this job.
+  const at=marks.findIndex(m=>m.job===jobId&&m.chapter===currentId&&m.block===bi);
   let next;
   if(at!==-1){next=marks.filter((_,k)=>k!==at);toast('نشان حذف شد')}
-  else{next=marks.concat([{chapter:currentId,block:bi,note:'',created:new Date().toISOString()}]).slice(-50);toast('نشان ذخیره شد')}
+  else{next=marks.concat([{chapter:currentId,block:bi,note:'',created:new Date().toISOString(),job:jobId}]).slice(-50);toast('نشان ذخیره شد')}
   save({reading_bookmarks:next});
 });
 $('#marks-list').addEventListener('click',e=>{
@@ -699,8 +701,12 @@ function renderMarks(){
   const box=$('#marks-list');
   if(!box)return;
   const marks=settings.reading_bookmarks||[];
-  if(!marks.length){box.innerHTML='<p class="toc-empty">هنوز نشانی ثبت نشده. با 🔖 موقعیت فعلی را ذخیره کنید.</p>';return}
-  box.innerHTML=marks.map((mk,idx)=>{
+  // Rows are per user, so only this book's marks are shown; the global index
+  // is kept in every control so jump/edit/delete still address the right row.
+  const own=marks.map((mk,idx)=>[mk,idx]).filter(pair=>pair[0].job===jobId);
+  if(!own.length){box.innerHTML='<p class="toc-empty">هنوز نشانی ثبت نشده. با 🔖 موقعیت فعلی را ذخیره کنید.</p>';return}
+  box.innerHTML=own.map(pair=>{
+    const mk=pair[0],idx=pair[1];
     const ch=chapters.find(c=>c.id===mk.chapter);
     const label=ch?esc(ch.title):('فصل '+faNum(mk.chapter+1));
     return '<div class="mark-row" data-i="'+idx+'"><button type="button" class="mark-go" data-go="'+idx+'" title="پرش به نشان">'+label+'</button>'+

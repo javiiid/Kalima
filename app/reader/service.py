@@ -287,6 +287,13 @@ def clean_bookmarks(value: object, limit: int = 50) -> list[dict]:
     One bad entry must never discard the reader's other marks, and the
     list can never grow without bound: the oldest entries beyond the cap
     are dropped, never the request rejected.
+
+    ``job`` binds a mark to the book it was made in. Bookmark rows are
+    stored per user (not per book), and chapter/block numbers repeat across
+    books, so without this a mark made in book A would appear over the same
+    paragraph number in book B. Rows written before this key existed simply
+    have no ``job``; the clients treat those as belonging to no book and
+    hide them rather than guess.
     """
     if not isinstance(value, list):
         return []
@@ -306,5 +313,14 @@ def clean_bookmarks(value: object, limit: int = 50) -> list[dict]:
             block = 0
         note = str(entry.get("note", ""))[:500]
         created = str(entry.get("created", ""))
-        cleaned.append({"chapter": chapter, "block": max(0, block), "note": note, "created": created})
+        job = str(entry.get("job", ""))[:64]
+        cleaned.append(
+            {
+                "chapter": chapter,
+                "block": max(0, block),
+                "note": note,
+                "created": created,
+                "job": job,
+            }
+        )
     return cleaned[-max(1, limit):]

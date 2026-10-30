@@ -83,6 +83,18 @@ def test_clean_bookmarks_rejects_non_lists():
     assert clean_bookmarks({"chapter": 1}) == []
 
 
+def test_clean_bookmarks_keeps_the_book_a_mark_belongs_to():
+    cleaned = clean_bookmarks([
+        {"chapter": 2, "block": 5, "job": "job-A", "note": "x"},
+        {"chapter": 1, "job": "y" * 100},
+    ])
+    assert cleaned[0]["job"] == "job-A"
+    # Bounded so a hostile client cannot store an unbounded string; a row
+    # with no job is "" (belongs to no book), never a fabricated id.
+    assert len(cleaned[1]["job"]) == 64
+    assert clean_bookmarks([{"chapter": 1}])[0]["job"] == ""
+
+
 def test_reading_defaults_carry_the_new_keys():
     from app.web import READING_DEFAULTS
 

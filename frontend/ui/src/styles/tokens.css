@@ -399,6 +399,95 @@
   color-scheme: dark;
 }
 
+/* --------------------------------------------------------------------------
+   READER SURFACE THEMES
+
+   The reader carries its own theme, separate from the app's day/dark mode:
+   a reader who wants a sepia page on a light app (or a dark page by day)
+   picks it in the reader, and only the `/reader` subtree changes. These are
+   scope remaps of the semantic tokens the reader surface already uses, taken
+   from the palettes in `app/reader/page.py` (`:root`, `body.theme-sepia`,
+   `body.theme-night`, `body.theme-contrast`). Light reproduces the day app
+   tokens so the default reader is unchanged.
+
+   Every value is checked in `tests/tokens.contrast.test.ts`, like the app
+   themes: a reading surface that fails AA is the one surface a reader stares
+   at for hours, so it is not left to taste. Muted inks and the sepia ink were
+   darkened slightly from the Python values where the originals measured under
+   4.5:1 on their own surface.
+   -------------------------------------------------------------------------- */
+.reader-theme-light {
+  --color-surface: #ffffff;
+  --color-surface-elevated: #f2f6f8;
+  --color-surface-sunken: #eaf0f4;
+  --color-text-primary: #16333f;
+  --color-text-secondary: #3a5768;
+  --color-text-muted: #55707f;
+  --color-text-brand: #2e5c70;
+  --color-primary: #4c7c92;
+  --color-primary-subtle: #eff5f8;
+  --color-border: #dbe4ea;
+  --color-border-strong: #7e97a5;
+  --color-border-strong-elevated: #6d8794;
+  --color-focus: #2e5c70;
+  --color-progress-track: #e4ebef;
+  --color-progress-fill: #4c7c92;
+}
+
+.reader-theme-sepia {
+  --color-surface: #fbf4e4;
+  --color-surface-elevated: #f5ead4;
+  --color-surface-sunken: #efe3cd;
+  --color-text-primary: #41341f;
+  --color-text-secondary: #574427;
+  --color-text-muted: #6f5b39;
+  --color-text-brand: #6b3f14;
+  --color-primary: #8a5a24;
+  --color-primary-subtle: #f0e2c8;
+  --color-border: #e6d8bd;
+  --color-border-strong: #8b785a;
+  --color-border-strong-elevated: #8b785a;
+  --color-focus: #6b3f14;
+  --color-progress-track: #e6d8bd;
+  --color-progress-fill: #8a5a24;
+}
+
+.reader-theme-night {
+  --color-surface: #1e2126;
+  --color-surface-elevated: #24272d;
+  --color-surface-sunken: #14161a;
+  --color-text-primary: #ddd8ce;
+  --color-text-secondary: #cbc6bb;
+  --color-text-muted: #a9a49a;
+  --color-text-brand: #dcc189;
+  --color-primary: #c9ad74;
+  --color-primary-subtle: #2c2a23;
+  --color-border: #33383f;
+  --color-border-strong: #9b978f;
+  --color-border-strong-elevated: #9b978f;
+  --color-focus: #c9ad74;
+  --color-progress-track: #33383f;
+  --color-progress-fill: #c9ad74;
+}
+
+.reader-theme-contrast {
+  --color-surface: #0a0a0a;
+  --color-surface-elevated: #161616;
+  --color-surface-sunken: #000000;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #f0f0f0;
+  --color-text-muted: #e8e8e8;
+  --color-text-brand: #ffd60a;
+  --color-primary: #ffd60a;
+  --color-primary-subtle: #2e2606;
+  --color-border: #5a5a5a;
+  --color-border-strong: #e8e8e8;
+  --color-border-strong-elevated: #e8e8e8;
+  --color-focus: #ffd60a;
+  --color-progress-track: #4a4a4a;
+  --color-progress-fill: #ffd60a;
+}
+
 @layer base {
   * {
     border-color: var(--color-border);

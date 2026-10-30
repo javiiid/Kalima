@@ -18,7 +18,12 @@ import { describe, it } from 'node:test'
 const TOKENS = new URL('../src/styles/tokens.css', import.meta.url)
 
 type RGB = [number, number, number]
-type Mode = 'day' | 'dark'
+/**
+ * The app themes plus the four reader surface themes. The reader themes live
+ * in their own `.reader-theme-*` scopes in tokens.css, so they are resolved
+ * from their own block rather than from `:root`/`.dark`.
+ */
+type Mode = 'day' | 'dark' | 'reader-light' | 'sepia' | 'night' | 'contrast'
 /** [theme, foreground, background, minimum ratio, why] */
 type Pair = [Mode, string, string, number, string]
 
@@ -59,6 +64,29 @@ export function contrast(a: string, b: string): number {
 const AA = 4.5
 const AA_LARGE = 3.0
 const AA_NON_TEXT = 3.0
+
+/**
+ * The reader surface themes. Each is a self-contained remap of the
+ * reader-relevant tokens, so it is checked on its own surface rather than
+ * falling back to the app's day/dark values. Generated so a new reader theme
+ * only has to be named once.
+ */
+const READER_THEMES = ['reader-light', 'sepia', 'night', 'contrast'] as const
+
+const READER_PAIRS: Pair[] = READER_THEMES.flatMap((theme): Pair[] => {
+  const at = `reader ${theme}`
+  return [
+    [theme, '--color-text-primary', '--color-surface', AA, `${at}: body text on the reading card`],
+    [theme, '--color-text-primary', '--color-surface-elevated', AA, `${at}: body text on an elevated panel`],
+    [theme, '--color-text-secondary', '--color-surface', AA, `${at}: secondary text`],
+    [theme, '--color-text-muted', '--color-surface', AA, `${at}: muted caption`],
+    [theme, '--color-text-brand', '--color-primary-subtle', AA, `${at}: active control label on its wash`],
+    [theme, '--color-border-strong', '--color-surface', AA_NON_TEXT, `${at}: control outline`],
+    [theme, '--color-border-strong-elevated', '--color-surface-elevated', AA_NON_TEXT, `${at}: outline on a panel`],
+    [theme, '--color-focus', '--color-surface', AA_NON_TEXT, `${at}: focus ring`],
+    [theme, '--color-progress-fill', '--color-progress-track', AA_NON_TEXT, `${at}: progress fill on its track`],
+  ]
+})
 
 /**
  * [theme, foreground, background, minimum, why]
@@ -194,6 +222,9 @@ const PAIRS: Pair[] = [
   ['day', '--color-text-muted', '--color-surface', AA, 'day: an unselected bar label on the bar'],
   // The primary action at rest uses the normal primary/inverse pair above;
   // its selected state uses the nav indicator pair, so both states stay distinct.
+
+  // The reader surface themes, each against its own background.
+  ...READER_PAIRS,
 ]
 
 /**
@@ -233,8 +264,20 @@ const day = { ...theme, ...root }
 /** Dark values, falling back to @theme for anything not overridden. */
 const darkResolved = { ...theme, ...dark }
 
-function resolve(name: string, mode: 'day' | 'dark'): string {
-  const table: Record<string, string> = mode === 'dark' ? darkResolved : day
+/**
+ * Reader theme values, each falling back to the day tokens for anything the
+ * scope does not override (it only remaps the tokens the reader surface uses).
+ */
+const readerTables: Record<string, Record<string, string>> = {
+  'reader-light': { ...day, ...readBlock(css, '.reader-theme-light') },
+  sepia: { ...day, ...readBlock(css, '.reader-theme-sepia') },
+  night: { ...day, ...readBlock(css, '.reader-theme-night') },
+  contrast: { ...day, ...readBlock(css, '.reader-theme-contrast') },
+}
+
+function resolve(name: string, mode: Mode): string {
+  const table: Record<string, string> =
+    mode === 'dark' ? darkResolved : (readerTables[mode] ?? day)
   const value = table[name]
   if (value === undefined) {
     throw new Error(

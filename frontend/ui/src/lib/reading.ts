@@ -12,7 +12,7 @@
  * rendering and nothing else.
  */
 
-import type { ReadingSettings } from './api.ts'
+import type { Bookmark, ReadingSettings, ReadingTheme } from './api.ts'
 
 /** Display modes the reader port implements. */
 export type ReaderMode = 'translation' | 'original' | 'bilingual' | 'columns'
@@ -40,6 +40,49 @@ export const READER_MODES: readonly ReaderMode[] = [
   'bilingual',
   'columns',
 ]
+
+/**
+ * Reader surface themes, in the Python swatch order
+ * (`app/reader/page.py`: روشن / گرم / شب / کنتراست).
+ */
+export const READING_THEMES: readonly ReadingTheme[] = ['light', 'sepia', 'night', 'contrast']
+
+/**
+ * The theme for a stored value, mirroring `theme()` in the Python reader:
+ * an unknown value is `light` (the Python fallback), never a blank surface.
+ */
+export function toReadingTheme(value: string | null | undefined): ReadingTheme {
+  return value === 'light' || value === 'sepia' || value === 'night' || value === 'contrast'
+    ? value
+    : 'light'
+}
+
+/**
+ * The theme to render for a stored settings row, mirroring `theme()` in
+ * `app/reader/page.py`: a recognised `reading_theme` wins, otherwise the
+ * legacy `study_night_mode` flag decides, and the fallback is the light
+ * surface. Rows written before `reading_theme` existed only carry the flag.
+ */
+export function themeForStored(
+  stored: { reading_theme?: string; study_night_mode?: boolean } | undefined,
+): ReadingTheme {
+  const value = stored?.reading_theme
+  if (value === 'light' || value === 'sepia' || value === 'night' || value === 'contrast') {
+    return value
+  }
+  return stored?.study_night_mode ? 'night' : 'light'
+}
+
+/**
+ * The patch a theme swatch writes. `save()` in `app/reader/page.py` keeps the
+ * legacy `study_night_mode` flag in step with the theme, so an older client
+ * that only knows the night toggle still follows the choice.
+ */
+export function themePatch(
+  theme: ReadingTheme,
+): Pick<ReadingSettings, 'reading_theme' | 'study_night_mode'> {
+  return { reading_theme: theme, study_night_mode: theme === 'night' }
+}
 
 /** Font sizes the Python sheet offers. The slider admits more; the server clamps to 14–30. */
 export const FONT_SIZE_MIN = 14
@@ -195,4 +238,90 @@ export function syncTop(sourceTop: number, sourceMax: number, targetMax: number)
   if (!Number.isFinite(sourceTop) || !(sourceMax > 0) || !(targetMax > 0)) return 0
   const ratio = Math.min(1, Math.max(0, sourceTop / sourceMax))
   return ratio * targetMax
+}
+
+/* ------------------------------------------------------------------ */
+/* In-text bookmarks with a note                                        */
+/* ------------------------------------------------------------------ */
+
+/** The server caps a note at 500 characters (`clean_bookmarks`). */
+export const NOTE_MAX = 500
+
+/** The server keeps the newest 50 marks (`clean_bookmarks`). */
+export const BOOKMARK_MAX = 50
+
+/**
+ * Marks that belong to one book.
+ *
+ * Mark rows are stored per user, but chapter/block numbers repeat across
+ * books; a row with a different (or empty) `job` is not this book's and is
+ * hidden rather than shown over an unrelated paragraph.
+ */
+export function bookmarksFor(
+  bookmarks: readonly Bookmark[] | undefined,
+  jobId: string,
+): Bookmark[] {
+  return (bookmarks ?? []).filter((mark) => mark.job === jobId)
+}
+
+/** Whether this chapter + block already carries a mark for this book. */
+export function hasBookmark(
+  bookmarks: readonly Bookmark[] | undefined,
+  jobId: string,
+  chapter: number,
+  block: number,
+): boolean {
+  return bookmarksFor(bookmarks, jobId).some(
+    (mark) => mark.chapter === chapter && mark.block === block,
+  )
+}
+
+/**
+ * Toggle one mark, mirroring the Python `#mark-btn`: the same spot removes
+ * it, anywhere else adds it. The whole list (every book) is returned so the
+ * caller can persist it, newest-capped at `BOOKMARK_MAX` like the server.
+ */
+export function toggleBookmark(
+  bookmarks: readonly Bookmark[] | undefined,
+  entry: Bookmark,
+): Bookmark[] {
+  const all = bookmarks ?? []
+  const index = all.findIndex(
+    (mark) =>
+      mark.job === entry.job && mark.chapter === entry.chapter && mark.block === entry.block,
+  )
+  if (index !== -1) return all.filter((_, position) => position !== index)
+  return [...all, { ...entry, note: noteSliced(entry.note) }].slice(-BOOKMARK_MAX)
+}
+
+/** Replace the note on one mark; other marks and other books are untouched. */
+export function setBookmarkNote(
+  bookmarks: readonly Bookmark[] | undefined,
+  jobId: string,
+  chapter: number,
+  block: number,
+  note: string,
+): Bookmark[] {
+  const text = noteSliced(note)
+  return (bookmarks ?? []).map((mark) =>
+    mark.job === jobId && mark.chapter === chapter && mark.block === block
+      ? { ...mark, note: text }
+      : mark,
+  )
+}
+
+/** Remove one mark, returning the full list to persist. */
+export function removeBookmark(
+  bookmarks: readonly Bookmark[] | undefined,
+  jobId: string,
+  chapter: number,
+  block: number,
+): Bookmark[] {
+  return (bookmarks ?? []).filter(
+    (mark) => !(mark.job === jobId && mark.chapter === chapter && mark.block === block),
+  )
+}
+
+function noteSliced(note: string): string {
+  return String(note ?? '').slice(0, NOTE_MAX)
 }

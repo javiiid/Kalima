@@ -88,3 +88,39 @@
     overflow: visible;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Reader surface theme swatches
+
+   Each swatch carries its own `.reader-theme-*` scope (defined in
+   `tokens.css`), so it previews its own surface and border rather than
+   restating the palette here.
+   -------------------------------------------------------------------------- */
+
+.reader-swatch {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 2px solid var(--color-border-strong);
+  border-radius: 9999px;
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+.reader-swatch[aria-pressed='true'] {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   The block being read aloud
+
+   Mirrors `.speaking` in `app/reader/page.py`: a tinted wash so the eye can
+   follow the voice down the page. Token-only.
+   -------------------------------------------------------------------------- */
+
+.speaking {
+  background: var(--color-primary-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 var(--spacing-1) var(--color-primary-subtle);
+}

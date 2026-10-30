@@ -9,28 +9,39 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  BOOKMARK_MAX,
   DIRECTION_OPTIONS,
   FONT_SIZE_FALLBACK,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   LINE_HEIGHT_FALLBACK,
   LINE_HEIGHT_OPTIONS,
+  NOTE_MAX,
   READER_MODES,
+  READING_THEMES,
   WIDTH_FALLBACK,
   WIDTH_OPTIONS,
+  bookmarksFor,
   clampFontSize,
   clampLineHeight,
   clampWidth,
   directionFor,
+  hasBookmark,
   isDirection,
   lastLocationOf,
   locationKey,
   overallPercent,
   pairedBlocks,
   readKey,
+  removeBookmark,
+  setBookmarkNote,
   storedChapter,
   syncTop,
+  themeForStored,
+  themePatch,
   toReaderMode,
+  toReadingTheme,
+  toggleBookmark,
 } from '../src/lib/reading.ts'
 
 describe('the reading mode', () => {
@@ -210,5 +221,99 @@ describe('remembered location', () => {
 
   it('ignores a remembered chapter that no longer exists', () => {
     assert.equal(storedChapter([0, 1], null, { chapter: 7 }, { chapter: 7 }), null)
+  })
+})
+
+describe('reader surface themes', () => {
+  it('knows the four themes the Python swatches offer, in order', () => {
+    assert.deepEqual([...READING_THEMES], ['light', 'sepia', 'night', 'contrast'])
+    for (const theme of READING_THEMES) {
+      assert.equal(toReadingTheme(theme), theme)
+    }
+  })
+
+  it('falls back to light on a value the client does not know', () => {
+    assert.equal(toReadingTheme('midnight'), 'light')
+    assert.equal(toReadingTheme(undefined), 'light')
+    assert.equal(toReadingTheme(''), 'light')
+  })
+
+  it('mirrors theme(): a known theme wins, then the legacy night flag', () => {
+    assert.equal(themeForStored({ reading_theme: 'sepia' }), 'sepia')
+    // A row written before reading_theme existed only carries the flag.
+    assert.equal(themeForStored({ study_night_mode: true }), 'night')
+    assert.equal(themeForStored({ study_night_mode: false }), 'light')
+    assert.equal(themeForStored({}), 'light')
+    assert.equal(themeForStored(undefined), 'light')
+    // The legacy flag must not override an explicit theme.
+    assert.equal(themeForStored({ reading_theme: 'contrast', study_night_mode: true }), 'contrast')
+  })
+
+  it('keeps the legacy night flag in step when a swatch is picked', () => {
+    assert.deepEqual(themePatch('night'), { reading_theme: 'night', study_night_mode: true })
+    assert.deepEqual(themePatch('sepia'), { reading_theme: 'sepia', study_night_mode: false })
+  })
+})
+
+describe('in-text marks', () => {
+  const mark = (chapter: number, block: number, note = '', job = 'book-A') => ({
+    chapter,
+    block,
+    note,
+    created: 'x',
+    job,
+  })
+
+  it('shows only the marks that belong to this book', () => {
+    const all = [mark(0, 0, '', 'book-A'), mark(0, 0, '', 'book-B'), mark(1, 2, '', 'book-A')]
+    assert.deepEqual(bookmarksFor(all, 'book-A'), [all[0], all[2]])
+    assert.deepEqual(bookmarksFor(all, 'book-C'), [])
+    assert.deepEqual(bookmarksFor(undefined, 'book-A'), [])
+  })
+
+  it('captures a row with no job as belonging to no book', () => {
+    // Rows written before `job` existed carry "" and must not appear in a book.
+    const legacy = { chapter: 0, block: 0, note: '', created: 'x', job: '' }
+    assert.deepEqual(bookmarksFor([legacy], 'book-A'), [])
+  })
+
+  it('toggles the same spot off and a new spot on', () => {
+    const at = mark(2, 3)
+    assert.deepEqual(toggleBookmark([at], at), [])
+    const added = toggleBookmark([], at)
+    assert.equal(added.length, 1)
+    assert.deepEqual({ ...added[0], created: 'x' }, at)
+  })
+
+  it('does not let one book toggle another book’s mark', () => {
+    const other = mark(2, 3, '', 'book-B')
+    // Same chapter + block, different book: the wanted one is added, the
+    // other is kept.
+    assert.deepEqual(toggleBookmark([other], mark(2, 3)), [other, mark(2, 3)])
+  })
+
+  it('keeps the newest 50 marks, like the server', () => {
+    let list = toggleBookmark([], mark(0, 0))
+    for (let index = 1; index <= BOOKMARK_MAX + 5; index++) {
+      list = toggleBookmark(list, mark(0, index))
+    }
+    assert.equal(list.length, BOOKMARK_MAX)
+    assert.equal(list[0]!.block, 6)
+  })
+
+  it('trims a note to the server cap and edits only the targeted mark', () => {
+    const a = mark(1, 1, 'old')
+    const b = mark(1, 2, 'keep')
+    const next = setBookmarkNote([a, b], 'book-A', 1, 1, 'y'.repeat(NOTE_MAX + 20))
+    assert.equal(next[0]!.note.length, NOTE_MAX)
+    assert.equal(next[1]!.note, 'keep')
+  })
+
+  it('detects a mark and removes exactly one', () => {
+    const all = [mark(1, 1), mark(1, 2), mark(1, 2, '', 'book-B')]
+    assert.equal(hasBookmark(all, 'book-A', 1, 2), true)
+    assert.equal(hasBookmark(all, 'book-A', 9, 9), false)
+    const left = removeBookmark(all, 'book-A', 1, 2)
+    assert.deepEqual(left, [all[0], all[2]])
   })
 })

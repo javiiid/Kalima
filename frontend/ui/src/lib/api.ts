@@ -234,7 +234,12 @@ export interface Language {
 
 export interface ReadingSettings {
   study_night_mode: boolean
-  reading_theme: 'light' | 'dark'
+  /**
+   * The reader surface theme. The server accepts all four
+   * (`app/web.py` clamps to {light, night, sepia, contrast}); the Python
+   * reader (`app/reader/page.py`) renders the same four.
+   */
+  reading_theme: ReadingTheme
   reading_mode: 'translation' | 'original' | 'bilingual' | 'columns'
   reading_font_size: number
   reading_line_height: number
@@ -252,6 +257,28 @@ export interface ReadingSettings {
    * here so payloads built before the glossary step still typecheck.
    */
   reading_glossary?: boolean
+  /**
+   * In-text marks with a note, stored per user by the server
+   * (`clean_bookmarks` in `app/reader/service.py`). `job` binds a mark to
+   * its book; see `bookmarksFor` in `lib/reading.ts`.
+   */
+  reading_bookmarks?: Bookmark[]
+}
+
+/** The four reader surface themes, matching the Python reader's swatches. */
+export type ReadingTheme = 'light' | 'night' | 'sepia' | 'contrast'
+
+/**
+ * One saved mark. Mirrors the server's cleaned shape exactly: `chapter` and
+ * `block` locate it, `note` is capped at 500 chars, `job` is the book, and
+ * `created` is an ISO stamp. The server drops any other key.
+ */
+export interface Bookmark {
+  chapter: number
+  block: number
+  note: string
+  created: string
+  job: string
 }
 
 /* ------------------------------------------------------------------ */

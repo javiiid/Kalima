@@ -897,12 +897,17 @@
 .landing-flow-dot {
   position: absolute;
   top: 1px;
-  inset-inline-start: 4px;
+  left: 4px;
   width: 6px;
   height: 6px;
   border-radius: var(--radius-badge);
   background: var(--color-progress-fill);
   opacity: 0;
+}
+
+[dir='rtl'] .landing-flow-dot {
+  left: auto;
+  right: 4px;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -913,21 +918,29 @@
     animation-delay: -3.5s;
   }
   .landing-flow-dot {
-    animation: landing-flow 2.4s linear infinite;
+    animation: landing-flow-ltr 2.4s linear infinite;
   }
+  [dir='rtl'] .landing-flow-dot {
+    animation-name: landing-flow-rtl;
+  }
+  /* Negative delays spread the three dots along the track on first paint,
+     so the flow reads as continuous instead of starting empty. */
   .landing-flow-dot:nth-child(2) {
-    animation-delay: 0.8s;
+    animation-delay: -0.8s;
   }
   .landing-flow-dot:nth-child(3) {
-    animation-delay: 1.6s;
+    animation-delay: -1.6s;
   }
 }
 
-/* Right-to-left travel: inset-inline-start is the right edge here, so a
-   negative X drift reads as forward progress, source to translation. */
-@keyframes landing-flow {
+/* Full-track travel in both directions with physical properties (`left` in
+   LTR, `right` in RTL): logical `inset-inline-start` inside `@keyframes`
+   does not interpolate reliably, which left the track empty. Each version
+   runs from the reading-start edge to the reading-end edge, so motion always
+   reads as source-to-translation. */
+@keyframes landing-flow-ltr {
   0% {
-    transform: translateX(0);
+    left: 4px;
     opacity: 0;
   }
   15% {
@@ -937,7 +950,24 @@
     opacity: 1;
   }
   100% {
-    transform: translateX(-72px);
+    left: calc(100% - 10px);
+    opacity: 0;
+  }
+}
+
+@keyframes landing-flow-rtl {
+  0% {
+    right: 4px;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    right: calc(100% - 10px);
     opacity: 0;
   }
 }
@@ -949,6 +979,28 @@
   }
   50% {
     transform: translateY(-6px);
+  }
+}
+
+/* Reduced motion: the dots are decoration (aria-hidden), but an empty track
+   reads as broken. Park three static dots along the track instead. */
+@media (prefers-reduced-motion: reduce) {
+  .landing-flow-dot {
+    opacity: 1;
+  }
+  .landing-flow-dot:nth-child(2) {
+    left: calc(50% - 3px);
+  }
+  .landing-flow-dot:nth-child(3) {
+    left: calc(100% - 10px);
+  }
+  [dir='rtl'] .landing-flow-dot:nth-child(2) {
+    left: auto;
+    right: calc(50% - 3px);
+  }
+  [dir='rtl'] .landing-flow-dot:nth-child(3) {
+    left: auto;
+    right: calc(100% - 10px);
   }
 }
 
@@ -1011,9 +1063,118 @@
 }
 
 .landing-bench-fill {
+  display: block;
+  position: relative;
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--color-primary), var(--color-text-brand));
+  transform-origin: left center;
+}
+
+[dir='rtl'] .landing-bench-fill {
+  transform-origin: right center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Bars land fast (one short grow on reveal), then a ball sweeps each pipe
+     forever. The sweep time is proportional to the verified benchmark
+     (72.2s / 24.2s / 12.3s / 6.6s), scaled so the slowest pipe takes ~15s:
+       row1 100%  -> 15s
+       row2 33.5% -> 5.02s  (15 * 24.2 / 72.2)
+       row3 17%   -> 2.55s  (15 * 12.3 / 72.2)
+       row4 9.1%  -> 1.37s  (15 * 6.6 / 72.2)
+     so each ball is visibly quicker than the one above it. `scaleX` (not
+     `width`) grows the bar so the inline verified widths stay the source of
+     truth. The ball is a `::after` (no markup change; the track is already
+     `aria-hidden`), rendered only under `no-preference` -- reduced-motion
+     and no-JS show the clean static chart. */
+  .landing-reveal .landing-bench-fill {
+    transform: scaleX(0);
+  }
+  .landing-reveal.is-visible .landing-bench-fill {
+    animation: landing-bench-grow 0.8s var(--ease-out) forwards;
+  }
+  .landing-reveal.is-visible .landing-bench-row:nth-child(2) .landing-bench-fill {
+    animation-delay: 0.1s;
+  }
+  .landing-reveal.is-visible .landing-bench-row:nth-child(3) .landing-bench-fill {
+    animation-delay: 0.2s;
+  }
+  .landing-reveal.is-visible .landing-bench-row:nth-child(4) .landing-bench-fill {
+    animation-delay: 0.3s;
+  }
+  .landing-bench-fill::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-badge);
+    background: var(--color-text-inverse);
+    box-shadow: var(--shadow-raised);
+    opacity: 0;
+    animation: landing-bench-ball-ltr 15s linear 1.1s infinite;
+  }
+  [dir='rtl'] .landing-bench-fill::after {
+    left: auto;
+    right: 0;
+    animation-name: landing-bench-ball-rtl;
+  }
+  .landing-bench-row:nth-child(2) .landing-bench-fill::after {
+    animation-duration: 5.02s;
+  }
+  .landing-bench-row:nth-child(3) .landing-bench-fill::after {
+    animation-duration: 2.55s;
+  }
+  .landing-bench-row:nth-child(4) .landing-bench-fill::after {
+    animation-duration: 1.37s;
+  }
+}
+
+@keyframes landing-bench-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* Physical `left`/`right` (not logical inset): logical properties inside
+   `@keyframes` do not interpolate reliably, which once left a track empty. */
+@keyframes landing-bench-ball-ltr {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  94% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(100% - 8px);
+    opacity: 0;
+  }
+}
+
+@keyframes landing-bench-ball-rtl {
+  0% {
+    right: 0;
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  94% {
+    opacity: 1;
+  }
+  100% {
+    right: calc(100% - 8px);
+    opacity: 0;
+  }
 }
 
 .landing-bench-value {

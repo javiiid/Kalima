@@ -425,6 +425,8 @@ app/
 │   ├── pipeline.py      main coordinator
 │   ├── semantic_chunker.py  lossless, token-budgeted chunking
 │   ├── pdf_handler.py   PDF rendering & extraction
+│   ├── pdf_text.py      phase 1: local text extraction (no API cost)
+│   ├── pdf_ocr.py       phase 2: local OCR of scans via OCRmyPDF
 │   └── quality_scorer.py    6-dimension chunk QA
 │
 ├── output/          output formats (EPUB/DOCX/PDF/Markdown/SRT/…)
@@ -502,6 +504,10 @@ every blob forever. Download the newest backup any time from `/account`.
 | `translation.max_retries` | `5` | Retries |
 | `translation.retry_delay` | `5` | Initial retry delay |
 | `translation.max_retry_delay` | `60` | Max retry delay |
+| `pdf.text_fastpath` | `true` | Read a text-bearing PDF locally instead of per-page vision |
+| `pdf.ocr` | `auto` | Local OCR of scans (`auto` = only when tools are installed, `on`/`off`) |
+| `pdf.ocr_language` | — | Force a Tesseract language code; otherwise derived from the source |
+| `pdf.ocr_timeout` | `1800` | Seconds before OCR is abandoned and vision takes over |
 
 ### Full example
 
@@ -524,6 +530,12 @@ translation:
   max_retries: 5
   retry_delay: 5
   max_retry_delay: 60
+
+pdf:
+  text_fastpath: true    # read text-bearing PDFs locally (phase 1)
+  ocr: "auto"            # local OCRmyPDF for scans: auto | on | off (phase 2)
+  # ocr_language: "fas"  # force a Tesseract code; else derived from source
+  ocr_timeout: 1800      # seconds before OCR gives way to vision
 ```
 
 > ⚠️ Saving settings from the account page rewrites this file with
@@ -562,6 +574,41 @@ preservation 15%, boundary integrity 10%, length ratio 5% — in `full`, `light`
 or `rules` (no-LLM) mode. It runs only when `quality_report` is requested, in
 parallel across chunks, and never breaks the job: failures fall back to
 rule-based scores with a flag reason.
+
+### PDF pipeline — text first, vision last
+
+Every PDF is classified locally before any provider call, then routed down the
+cheapest path that can work:
+
+1. **Text fast path** (`app/pipeline/pdf_text.py`, phase 1). A PDF that already
+   carries a text layer is read locally with PyMuPDF and rides the same
+   semantic chunker and translation memory as EPUB. Zero API calls to extract.
+2. **Local OCR** (`app/pipeline/pdf_ocr.py`, phase 2). A scan or a mixed file
+   (some pages text, some images) is run once through **OCRmyPDF** with
+   `--skip-text`: pages that already have text are left untouched, image-only
+   pages get a Tesseract text layer — all local and free. The result then takes
+   path 1, so it also gains translation memory and resumability.
+3. **Vision fallback** (`PDFHandler.transcribe_pdf`). Only when the file has no
+   usable text and OCR is unavailable or fails. This preserves the previous
+   per-page behaviour for hard scans.
+
+**Requirements.** OCRmyPDF needs **Tesseract** (with the language pack for the
+source language) and, for PDF/A output, **Ghostscript**; `--output-type pdf`
+avoids the Ghostscript requirement. On this machine OCRmyPDF is installed from
+the source checkout at `D:\OCRmyPDF` (`ocrmypdf` 17.x). When a tessdata
+directory has `configs/hocr` but the language pack lives in a *second* tessdata
+directory (the common split between the installer and a per-user language
+drop), `pdf_ocr` assembles one usable directory under the job's work dir.
+
+**Nothing here is a hard dependency.** With `pdf.ocr: auto` (the default), OCR
+runs only when the tools are genuinely detected; otherwise the job logs the
+reason and uses the vision fallback. The five failure modes that must *not*
+stop a job — OCRmyPDF missing, Ghostscript missing, language pack missing, OCR
+timeout, OCR producing too little text — all degrade to vision.
+
+> A scanned PDF that OCRs cleanly now costs **one translation call per chunk**
+> instead of one vision request per page, and repeated content is served from
+> translation memory.
 
 ---
 
@@ -797,7 +844,7 @@ Honest list of things still not right:
 | SRT | ✅ Fixed: translated text with estimated timing for books. |
 | Non-UTF-8 EPUB chapters | Silently skipped. |
 | PDF vision prompt | Hardcoded German→English in `pdf_handler.py`. |
-| OCR / `get_text()` fast path | Missing; every PDF renders as an image. |
+| OCR / `get_text()` fast path | ✅ Fixed: text PDFs read locally (phase 1); scans get local OCRmyPDF (phase 2). Vision is now the fallback only. |
 | Ctrl+C & crash tests | Pinned to 1 worker for hermeticity, so they no longer really exercise concurrency-12 behavior. |
 | Serve `dist/` from Python (Phase 6) | Not started and irreversible — needs `app/web.py` changes. |
 

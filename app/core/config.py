@@ -340,3 +340,72 @@ def get_chunking_config():
             CHUNK_CONTEXT_WINDOW_DEFAULT,
         ),
     }
+
+
+
+# ============================================================
+#
+# PDF text fast path. When a PDF already carries a text layer, extracting it
+# locally costs nothing and lets the PDF ride the same chunker and translation
+# memory as EPUB. Default is on: it only ever replaces paid vision calls for
+# text that is already in the file, and the vision path remains the fallback
+# for image-only scans.
+
+# PDF OCR pre-layer (phase 2). When a PDF has no usable text layer, OCRmyPDF
+# can build one locally for free. "auto" means: run it when the tools are
+# actually installed, otherwise skip silently and keep the vision fallback.
+# "on" forces the attempt (still degrades safely when tools are missing),
+# "off" disables it entirely.
+PDF_TEXT_FASTPATH_DEFAULT = True
+
+PDF_OCR_DEFAULT = "auto"
+
+
+def get_pdf_config():
+    """Return PDF pipeline settings, with defaults filled in.
+
+    Keys, all under ``pdf`` in config.yaml:
+
+        text_fastpath   bool   extract text locally instead of vision calls
+        ocr             str    "auto" | "on" | "off" -- local OCR for scans
+        ocr_language    str    Tesseract code to force, else derived from source
+        ocr_timeout     int    seconds before OCR is abandoned for vision
+    """
+
+    config = read_config()
+
+    pdf_config = config.get("pdf", {})
+
+    def _as_bool(value, fallback):
+        if value is None:
+            return fallback
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _as_int(value, fallback, minimum=0):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(minimum, parsed)
+
+    ocr_mode = pdf_config.get("ocr")
+    if ocr_mode is None:
+        ocr_mode = PDF_OCR_DEFAULT
+    ocr_mode = str(ocr_mode).strip().lower()
+    if ocr_mode not in {"auto", "on", "off"}:
+        ocr_mode = PDF_OCR_DEFAULT
+
+    ocr_language = pdf_config.get("ocr_language")
+    ocr_language = str(ocr_language).strip() if ocr_language else None
+
+    return {
+        "text_fastpath": _as_bool(
+            pdf_config.get("text_fastpath"),
+            PDF_TEXT_FASTPATH_DEFAULT,
+        ),
+        "ocr": ocr_mode,
+        "ocr_language": ocr_language,
+        "ocr_timeout": _as_int(pdf_config.get("ocr_timeout"), 1800, minimum=30),
+    }

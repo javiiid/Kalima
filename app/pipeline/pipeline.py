@@ -752,6 +752,7 @@ def _translate_pdf(
     on_job_started=None,
     style_preset=None,
     fallback_model=None,
+    user_id=1,
 ):
     """
     Execute the PDF processing pipeline.
@@ -816,15 +817,119 @@ def _translate_pdf(
             "[translate]"
         )
 
-        all_chunks, chapter_map = (
-            PDFHandler.transcribe_pdf(
-                client,
-                input_path,
-                paths,
-                dpi=150,
-                batch=False,
+        chunk_contexts = None
+
+        from app.core.config import get_pdf_config
+        from app.pipeline import pdf_text, pdf_ocr
+
+        pdf_cfg = get_pdf_config()
+
+        # Classify the file locally first. A PDF that already carries text rides
+        # the phase-1 fast path untouched; a scan or a mixed file gets one local
+        # OCRmyPDF pass (no API cost) and then rides the exact same path.
+        analysis = pdf_ocr.analyze_pdf(input_path)
+        source_pdf = input_path
+        ocr_report = {"used": False, "ok": False, "reason": ""}
+
+        use_text_fastpath = False
+
+        if pdf_cfg["text_fastpath"] and analysis["kind"] == "text":
+
+            use_text_fastpath = True
+
+        elif pdf_cfg["text_fastpath"] and pdf_cfg["ocr"] != "off":
+
+            # "auto" runs OCR only when the tools are genuinely installed;
+            # "on" attempts it anyway and still degrades safely if it fails.
+            if pdf_cfg["ocr"] == "auto":
+                ocr_ready = pdf_ocr.ocr_available(
+                    pdf_ocr.resolve_language(from_lang),
+                    work_dir=paths["job_dir"],
+                )["available"]
+            else:
+                ocr_ready = True
+
+            if ocr_ready:
+
+                print(
+                    "PDF has no usable text layer; running "
+                    "local OCR (OCRmyPDF --skip-text, "
+                    "no API calls). [translate]"
+                )
+
+                source_pdf, ocr_report = pdf_ocr.ensure_text_pdf(
+                    input_path,
+                    paths["job_dir"],
+                    language=pdf_cfg["ocr_language"],
+                    from_lang=from_lang,
+                    timeout=pdf_cfg["ocr_timeout"],
+                )
+
+                if ocr_report.get("ok"):
+
+                    after = (
+                        ocr_report.get("analysis_after")
+                        or analysis
+                    )
+
+                    use_text_fastpath = (
+                        after.get("pages_with_text", 0) > 0
+                    )
+
+                    print(
+                        f"OCR result: "
+                        f"{ocr_report.get('reason')} "
+                        f"[translate]"
+                    )
+
+                else:
+
+                    print(
+                        f"OCR not usable "
+                        f"({ocr_report.get('reason')}); "
+                        f"keeping the vision fallback. [translate]"
+                    )
+
+            else:
+
+                print(
+                    "OCRmyPDF/Tesseract not available; "
+                    "using the vision fallback. [translate]"
+                )
+
+        if use_text_fastpath:
+
+            # A text-bearing PDF costs no API call to read. Extracting it here
+            # is what lets the file skip the per-page vision requests below.
+            print(
+                "PDF text fast path: extracting "
+                "text locally (no vision calls). "
+                "[translate]"
             )
-        )
+
+            (
+                all_chunks,
+                chapter_map,
+                chunk_contexts,
+            ) = pdf_text.build_chunks(source_pdf)
+
+        else:
+
+            print(
+                "PDF has no usable text layer; "
+                "falling back to vision. "
+                "[translate]"
+            )
+
+            all_chunks, chapter_map = (
+                PDFHandler.transcribe_pdf(
+                    client,
+                    input_path,
+                    paths,
+                    dpi=150,
+                    batch=False,
+                )
+            )
 
         if not all_chunks:
 
@@ -837,7 +942,7 @@ def _translate_pdf(
 
         print(
             f"Extracted {len(all_chunks)} "
-            f"chunks/pages. [translate]"
+            f"chunks from the PDF. [translate]"
         )
 
         # ====================================================
@@ -848,6 +953,7 @@ def _translate_pdf(
             paths,
             all_chunks,
             chapter_map,
+            chunk_contexts,
         )
 
         # ====================================================
@@ -1098,6 +1204,7 @@ def translate(
     on_job_started=None,
     style_preset=None,
     fallback_model=None,
+    user_id=1,
 ):
     """
     Main translation dispatcher.
@@ -1303,6 +1410,7 @@ def translate(
             on_job_started=on_job_started,
         style_preset=style_preset,
             fallback_model=fallback_model,
+            user_id=user_id,
         )
 
     # ========================================================
@@ -1326,6 +1434,7 @@ def translate(
             on_job_started=on_job_started,
         style_preset=style_preset,
             fallback_model=fallback_model,
+            user_id=user_id,
         )
 
     # ========================================================

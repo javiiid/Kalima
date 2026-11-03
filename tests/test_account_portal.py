@@ -1,4 +1,5 @@
 from app.account import service
+from app.account import billing
 from app.account.page import account_page
 from app.core.web_i18n import inject_language_switcher
 from app.storage.database import Database
@@ -38,6 +39,27 @@ def test_checkout_order_and_business_request(monkeypatch, tmp_path):
     assert order["status"] == "submitted"
     request = service.create_business_request({"request_type": "enterprise", "contact_name": "Test", "email": "team@example.com"})
     assert request["status"] == "new"
+
+
+def test_grant_credits_lifts_balance_and_unblocks_charge(monkeypatch, tmp_path):
+    database = _use_temp_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(billing, "db", database)
+    billing.charge(1, billing.balance(1), "translation", "drain", require_positive=False)
+    assert billing.balance(1) == 0
+
+    result = billing.grant(1, 500, reference_id="admin-grant")
+    assert result["credits"] == 500
+    assert billing.balance(1) == 500
+
+    billing.check_credit(1, 1)
+    billing.charge(1, 1, "translation", "job")
+    assert billing.balance(1) == 499
+
+    ledger = database.fetch_all(
+        "SELECT kind,credits,status FROM billing_transactions WHERE kind='grant'"
+    )
+    assert len(ledger) == 1
+    assert ledger[0]["credits"] == 500 and ledger[0]["status"] == "committed"
 
 
 def test_account_page_is_bilingual_and_feature_complete():

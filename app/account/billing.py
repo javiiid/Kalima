@@ -87,3 +87,36 @@ def spend_usd(user_id: int, amount_usd: float, kind: str, reference_id: str = ""
     credits = max(int(minimum_credits), credits_for_usd(amount))
     return charge(user_id, credits, kind, reference_id, amount_usd=amount,
                   require_positive=require_positive)
+
+
+def grant(user_id: int, credits: int, kind: str = "grant", reference_id: str = "",
+          amount_usd: float = 0.0) -> dict:
+    """Credit a balance and append a matching ledger row.
+
+    The only counterpart to ``charge``. Checkout writes a ``pending`` row and
+    waits for a payment provider, so nothing could actually add credits until
+    one is connected; this is the path an admin script or a payment webhook
+    settles a completed purchase through. Atomic for the same reason as
+    ``charge``: two concurrent grants must not lose one another's update.
+    """
+    uid = int(user_id)
+    ensure_account(uid)
+    added = max(0, int(credits))
+    with db._lock, db.connect() as connection:
+        row = connection.execute(
+            "SELECT id,credit_balance FROM accounts WHERE user_id=?", (uid,)
+        ).fetchone()
+        if row is None:
+            raise InsufficientCredit("حساب مالی پیدا نشد.")
+        balance = int(row["credit_balance"] or 0) + added
+        connection.execute(
+            "UPDATE accounts SET credit_balance=?,updated_at=? WHERE user_id=?",
+            (balance, now(), uid),
+        )
+        connection.execute(
+            "INSERT INTO billing_transactions(account_id,kind,reference_id,amount_usd,credits,status,created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (int(row["id"]), kind[:40], str(reference_id)[:120], float(amount_usd or 0),
+             added, "committed", now()),
+        )
+    return {"credits": added, "balance": balance}

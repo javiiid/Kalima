@@ -104,6 +104,15 @@ def ensure_temp_structure(job_id):
             job_dir / "events.jsonl",
         "system_prompt_file":
             job_dir / "system_prompt.txt",
+
+        # Phase 3 PDF routing. ``page_plan.json`` is the per-page decision, kept
+        # so a resumed job does not re-profile or re-OCR; ``pages.json`` is the
+        # run report (source, chars, quality) for debugging and cost accounting.
+        "page_plan_file":
+            job_dir / "page_plan.json",
+
+        "pages_report_file":
+            job_dir / "pages.json",
     }
 
     return paths

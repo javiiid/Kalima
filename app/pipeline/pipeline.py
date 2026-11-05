@@ -17,8 +17,11 @@ Responsibilities
 - Clean temporary files after successful processing
 """
 
+import json
+import os
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -728,9 +731,110 @@ def _translate_epub(
             )
 
     return manifest_outputs
+
+
 # ============================================================
 # PDF PIPELINE
 # ============================================================
+
+def _is_rtl_language(language):
+    """True when the source language reads right to left."""
+    from app.output.typography import RTL_LANGUAGES
+
+    return str(language or "").strip().upper() in RTL_LANGUAGES
+
+
+def _write_job_json(path, payload):
+    """Write a small job report atomically."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def _load_page_plan(paths, input_path):
+    """Return a saved per-page plan for this input, or None.
+
+    A resumed job must not re-profile or re-OCR the book. The plan is only
+    reused when it belongs to the same input and any OCR output it points at
+    still exists on disk.
+    """
+    path = paths.get("page_plan_file")
+    if not path or not Path(path).exists():
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("input") != Path(input_path).name:
+        return None
+    pages = payload.get("pages")
+    if not isinstance(pages, list) or not pages:
+        return None
+
+    ocr_output = payload.get("ocr_output")
+    if any(entry.get("source") == "ocr" for entry in pages):
+        if not ocr_output or not Path(ocr_output).exists():
+            return None
+    return payload
+
+
+def _save_page_plan(paths, input_path, plan, ocr_output=None):
+    path = paths.get("page_plan_file")
+    if not path:
+        return
+    _write_job_json(
+        path,
+        {
+            "input": Path(input_path).name,
+            "created_at": _utc_timestamp(),
+            "ocr_output": str(ocr_output) if ocr_output else None,
+            "pages": plan,
+        },
+    )
+
+
+def _write_pages_report(paths, input_path, plan, *, ocr_seconds, ocr_report):
+    """Write ``pages.json`` and one summary event for the job."""
+    path = paths.get("pages_report_file")
+    if not path:
+        return
+
+    summary = {"text": 0, "ocr": 0, "vision": 0, "blank": 0}
+    for entry in plan:
+        source = entry.get("source")
+        if source in summary:
+            summary[source] += 1
+    summary["pages"] = len(plan)
+    summary["ocr_seconds"] = round(float(ocr_seconds), 2)
+
+    _write_job_json(
+        path,
+        {
+            "input": Path(input_path).name,
+            "generated_at": _utc_timestamp(),
+            "summary": summary,
+            "ocr": ocr_report,
+            "pages": plan,
+        },
+    )
+
+    try:
+        from app.core.structured_logging import get_job_logger
+
+        get_job_logger(paths).emit(
+            "pdf.pages_routed",
+            "per-page PDF routing complete",
+            summary=summary,
+        )
+    except Exception:  # noqa: BLE001
+        # Reporting must never break a translation job.
+        pass
+
 
 def _translate_pdf(
     client,

@@ -641,11 +641,16 @@ def _run_ocrmypdf(
     temp_dir: Path,
     timeout: int,
     jobs: int | None = None,
+    pages: list[int] | None = None,
 ) -> subprocess.CompletedProcess:
     """Invoke OCRmyPDF once with the flags this project depends on.
 
     ``--skip-text`` is the whole point: pages with text are never touched, so a
     text PDF costs nothing and a mixed PDF is solved page by page.
+
+    ``pages`` (0-based) adds ``--pages`` so a mostly-text book only pays OCR for
+    the handful of scanned pages. Unselected pages are copied through
+    untouched, so page count and order are preserved.
     """
     cmd = [
         str(exe),
@@ -658,6 +663,8 @@ def _run_ocrmypdf(
     ]
     if jobs:
         cmd[1:1] = ["--jobs", str(jobs)]
+    if pages:
+        cmd[1:1] = ["--pages", _pages_argument(pages)]
 
     env = dict(os.environ)
     # OCRmyPDF copies the input into a scratch dir; a non-writable TEMP aborts
@@ -678,6 +685,24 @@ def _run_ocrmypdf(
     )
 
 
+def _pages_argument(pages) -> str:
+    """Turn 0-based page indexes into OCRmyPDF's 1-based ``--pages`` syntax."""
+    numbers = sorted({int(page) + 1 for page in pages})
+    if not numbers:
+        return ""
+
+    ranges: list[str] = []
+    start = previous = numbers[0]
+    for number in numbers[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
 def ensure_text_pdf(
     input_path,
     work_dir,
@@ -687,6 +712,8 @@ def ensure_text_pdf(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     jobs: int | None = None,
     force: bool = False,
+    profile: list[dict] | None = None,
+    config: dict | None = None,
 ) -> tuple[Path, dict]:
     """Return a PDF with a usable text layer, running OCR only when needed.
 
@@ -695,16 +722,26 @@ def ensure_text_pdf(
     written next to the job's work dir. ``report`` carries ``used`` (whether OCR
     ran), ``ok`` (whether the result is usable) and ``reason`` for logging.
 
+    When the scan share is below ``ocr_pages_threshold`` only those pages are
+    sent to OCRmyPDF (``--pages``); a version that rejects the flag is retried
+    once on the whole file, so the feature can never break a job.
+
     Never raises for the ordinary "OCR is not available / did not help" cases:
     the caller decides whether to keep its vision fallback.
     """
+    from app.core.config import get_pdf_config
+
+    cfg = config or get_pdf_config()
     input_path = Path(input_path)
     work_dir = Path(work_dir)
     report: dict = {"used": False, "ok": False, "reason": "", "output": None}
 
+    if profile is None:
+        profile = profile_pages(input_path)
+    analysis = analyze_profile(profile, min_page_chars=int(cfg["min_page_chars"]))
+    report["analysis"] = analysis
+
     if not force:
-        analysis = analyze_pdf(input_path)
-        report["analysis"] = analysis
         if analysis["kind"] == "text":
             report["ok"] = True
             report["reason"] = "already has a text layer; OCR not needed"
@@ -727,6 +764,17 @@ def ensure_text_pdf(
 
     output_path = work_dir / f"{input_path.stem}_ocr.pdf"
 
+    scan_pages = [
+        int(item["page"]) for item in profile if item.get("kind") == "scan"
+    ]
+    total_pages = max(len(profile), 1)
+    selective = (
+        bool(scan_pages)
+        and (len(scan_pages) / total_pages) < float(cfg["ocr_pages_threshold"])
+    )
+    pages = scan_pages if selective else None
+    report["pages"] = list(pages) if pages else None
+
     try:
         result = _run_ocrmypdf(
             Path(availability["ocrmypdf"]),
@@ -737,6 +785,7 @@ def ensure_text_pdf(
             temp_dir=work_dir,
             timeout=timeout,
             jobs=jobs,
+            pages=pages,
         )
     except subprocess.TimeoutExpired:
         report["used"] = True
@@ -748,6 +797,30 @@ def ensure_text_pdf(
         return input_path, report
 
     report["used"] = True
+
+    if pages and (result.returncode != 0 or not output_path.exists()):
+        # Older OCRmyPDF releases do not know ``--pages``. One whole-file retry
+        # keeps the job moving instead of losing the OCR layer.
+        report["pages_fallback"] = True
+        try:
+            result = _run_ocrmypdf(
+                Path(availability["ocrmypdf"]),
+                input_path,
+                output_path,
+                language=lang,
+                tessdata=(
+                    Path(availability["tessdata"])
+                    if availability["tessdata"]
+                    else None
+                ),
+                temp_dir=work_dir,
+                timeout=timeout,
+                jobs=jobs,
+                pages=None,
+            )
+        except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError) as exc:
+            report["reason"] = f"ocr retry without --pages failed: {exc}"
+            return input_path, report
 
     if result.returncode != 0 or not output_path.exists():
         tail = (result.stderr or "").strip().splitlines()

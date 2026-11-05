@@ -55,6 +55,10 @@ dispatch with a clear message. Full pytest green.
    structured-log shipping, uptime + error alerting, 5xx rate dashboard.
 4. **Release hygiene.** `pyproject.toml`, versioned builds, secret scanning in
    CI, re-audit git history for keys, seeded demo account data.
+5. **OCR off the request path.** Phase 3 already limits OCRmyPDF to the scan
+   pages of a book (`pdf.ocr_pages_threshold`, `--pages`), but OCR is still
+   CPU-bound and runs inside the job thread. Hosted needs a separate worker
+   queue so one scanned book cannot starve every other translation.
 
 Acceptance: fresh VPS → running product in <30 min from the docs; kill -9 the
 container mid-book → resume works; restore-from-backup drill passes.

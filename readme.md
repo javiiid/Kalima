@@ -508,6 +508,12 @@ every blob forever. Download the newest backup any time from `/account`.
 | `pdf.ocr` | `auto` | Local OCR of scans (`auto` = only when tools are installed, `on`/`off`) |
 | `pdf.ocr_language` | — | Force a Tesseract language code; otherwise derived from the source |
 | `pdf.ocr_timeout` | `1800` | Seconds before OCR is abandoned and vision takes over |
+| `pdf.layout` | `auto` | Column/footnote aware reading order; `off` restores the phase 2 text |
+| `pdf.quality_gate` | `true` | Reject garbage OCR text per page before it is translated |
+| `pdf.min_page_chars` | `50` | Characters below which a page carries no usable text |
+| `pdf.max_garbage_ratio` | `0.35` | Share of symbol/control characters allowed in a page |
+| `pdf.vision_fallback` | `page` | `page` = only the problem page; `file` = phase 2 whole-file fallback |
+| `pdf.ocr_pages_threshold` | `0.3` | Scan share below which OCR runs on `--pages` only |
 
 ### Full example
 
@@ -536,6 +542,12 @@ pdf:
   ocr: "auto"            # local OCRmyPDF for scans: auto | on | off (phase 2)
   # ocr_language: "fas"  # force a Tesseract code; else derived from source
   ocr_timeout: 1800      # seconds before OCR gives way to vision
+  layout: "auto"         # column/footnote reading order; off = phase 2 text
+  quality_gate: true     # reject garbage OCR text before translation
+  min_page_chars: 50     # below this a page has no usable text
+  max_garbage_ratio: 0.35
+  vision_fallback: "page"  # page | file (phase 2 behaviour)
+  ocr_pages_threshold: 0.3
 ```
 
 > ⚠️ Saving settings from the account page rewrites this file with
@@ -577,20 +589,36 @@ rule-based scores with a flag reason.
 
 ### PDF pipeline — text first, vision last
 
-Every PDF is classified locally before any provider call, then routed down the
+Every page is profiled locally before any provider call, then routed down the
 cheapest path that can work:
 
-1. **Text fast path** (`app/pipeline/pdf_text.py`, phase 1). A PDF that already
-   carries a text layer is read locally with PyMuPDF and rides the same
-   semantic chunker and translation memory as EPUB. Zero API calls to extract.
-2. **Local OCR** (`app/pipeline/pdf_ocr.py`, phase 2). A scan or a mixed file
-   (some pages text, some images) is run once through **OCRmyPDF** with
-   `--skip-text`: pages that already have text are left untouched, image-only
-   pages get a Tesseract text layer — all local and free. The result then takes
-   path 1, so it also gains translation memory and resumability.
-3. **Vision fallback** (`PDFHandler.transcribe_pdf`). Only when the file has no
-   usable text and OCR is unavailable or fails. This preserves the previous
-   per-page behaviour for hard scans.
+1. **Page profile** (`pdf_ocr.profile_pages`, phase 3). Every page is classified
+   as `text`, `scan`, `figure` or `blank` from its text, image and vector
+   coverage. This is local and free, and it is the only place the decision is
+   made — `analyze_pdf` is derived from the same data.
+2. **Text fast path** (`app/pipeline/pdf_text.py`, phase 1). Text pages are read
+   locally with PyMuPDF and ride the same semantic chunker and translation
+   memory as EPUB. Zero API calls to extract. With `pdf.layout: auto` the
+   reader respects two-column order (right column first for RTL sources) and
+   moves small-font footnotes to the end of the page.
+3. **Local OCR** (`app/pipeline/pdf_ocr.py`, phase 2). Scan pages are run
+   through **OCRmyPDF** with `--skip-text` — all local and free. When only a few
+   pages are scans (`pdf.ocr_pages_threshold`), only those pages are sent with
+   `--pages`; a version that rejects the flag is retried on the whole file.
+4. **Quality gate** (`pdf_ocr.page_quality`, phase 3). OCR text is measured
+   (length, garbage ratio, single-character words, repeated runs) before it is
+   translated. A page that fails is demoted to vision — the garbage is never
+   sent to the model.
+5. **Vision fallback** (`PDFHandler.transcribe_pdf`, phase 3). Only the
+   `figure` pages and the pages the quality gate rejected are rendered and sent
+   as images. `pdf.vision_fallback: file` restores the phase 2 whole-file
+   behaviour.
+
+Chunks from all three sources are merged in page order and renumbered
+`chunk-0..N`, because `save_translated_pdf` orders output pages by chunk id.
+`pages.json` in the job directory records each page's source, character count
+and quality result; `page_plan.json` lets a resumed job skip re-profiling and
+re-OCR.
 
 **Requirements.** OCRmyPDF needs **Tesseract** (with the language pack for the
 source language) and, for PDF/A output, **Ghostscript**; `--output-type pdf`
@@ -844,7 +872,7 @@ Honest list of things still not right:
 | SRT | ✅ Fixed: translated text with estimated timing for books. |
 | Non-UTF-8 EPUB chapters | Silently skipped. |
 | PDF vision prompt | Hardcoded German→English in `pdf_handler.py`. |
-| OCR / `get_text()` fast path | ✅ Fixed: text PDFs read locally (phase 1); scans get local OCRmyPDF (phase 2). Vision is now the fallback only. |
+| OCR / `get_text()` fast path | ✅ Fixed: text pages read locally (phase 1); scans get local OCRmyPDF (phase 2); phase 3 routes per page, gates OCR quality and sends only figure/rejected pages to vision. |
 | Ctrl+C & crash tests | Pinned to 1 worker for hermeticity, so they no longer really exercise concurrency-12 behavior. |
 | Serve `dist/` from Python (Phase 6) | Not started and irreversible — needs `app/web.py` changes. |
 

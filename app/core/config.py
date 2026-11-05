@@ -360,6 +360,16 @@ PDF_TEXT_FASTPATH_DEFAULT = True
 
 PDF_OCR_DEFAULT = "auto"
 
+# Phase 3 -- per-page routing. ``layout: auto`` turns on column/footnote aware
+# extraction; ``off`` restores the phase 2 text exactly. The quality gate only
+# ever downgrades OCR output to the vision path, so it is safe to leave on.
+PDF_LAYOUT_DEFAULT = "auto"
+PDF_QUALITY_GATE_DEFAULT = True
+PDF_MIN_PAGE_CHARS_DEFAULT = 50
+PDF_MAX_GARBAGE_RATIO_DEFAULT = 0.35
+PDF_VISION_FALLBACK_DEFAULT = "page"
+PDF_OCR_PAGES_THRESHOLD_DEFAULT = 0.3
+
 
 def get_pdf_config():
     """Return PDF pipeline settings, with defaults filled in.
@@ -370,6 +380,12 @@ def get_pdf_config():
         ocr             str    "auto" | "on" | "off" -- local OCR for scans
         ocr_language    str    Tesseract code to force, else derived from source
         ocr_timeout     int    seconds before OCR is abandoned for vision
+        layout          str    "auto" | "on" | "off" -- column/footnote order
+        quality_gate    bool   reject garbage OCR text before translation
+        min_page_chars  int    chars below which a page carries no usable text
+        max_garbage_ratio float share of symbol/control chars allowed in a page
+        vision_fallback str    "page" | "file" -- scope of the vision fallback
+        ocr_pages_threshold float scan share below which OCR runs on --pages
     """
 
     config = read_config()
@@ -390,6 +406,16 @@ def get_pdf_config():
             return fallback
         return max(minimum, parsed)
 
+    def _as_float(value, fallback, minimum=0.0, maximum=None):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
+
     ocr_mode = pdf_config.get("ocr")
     if ocr_mode is None:
         ocr_mode = PDF_OCR_DEFAULT
@@ -400,6 +426,18 @@ def get_pdf_config():
     ocr_language = pdf_config.get("ocr_language")
     ocr_language = str(ocr_language).strip() if ocr_language else None
 
+    layout = pdf_config.get("layout")
+    layout = str(layout).strip().lower() if layout is not None else PDF_LAYOUT_DEFAULT
+    if layout not in {"auto", "on", "off"}:
+        layout = PDF_LAYOUT_DEFAULT
+
+    vision_fallback = pdf_config.get("vision_fallback")
+    if vision_fallback is None:
+        vision_fallback = PDF_VISION_FALLBACK_DEFAULT
+    vision_fallback = str(vision_fallback).strip().lower()
+    if vision_fallback not in {"page", "file"}:
+        vision_fallback = PDF_VISION_FALLBACK_DEFAULT
+
     return {
         "text_fastpath": _as_bool(
             pdf_config.get("text_fastpath"),
@@ -408,4 +446,27 @@ def get_pdf_config():
         "ocr": ocr_mode,
         "ocr_language": ocr_language,
         "ocr_timeout": _as_int(pdf_config.get("ocr_timeout"), 1800, minimum=30),
+        "layout": layout,
+        "quality_gate": _as_bool(
+            pdf_config.get("quality_gate"),
+            PDF_QUALITY_GATE_DEFAULT,
+        ),
+        "min_page_chars": _as_int(
+            pdf_config.get("min_page_chars"),
+            PDF_MIN_PAGE_CHARS_DEFAULT,
+            minimum=1,
+        ),
+        "max_garbage_ratio": _as_float(
+            pdf_config.get("max_garbage_ratio"),
+            PDF_MAX_GARBAGE_RATIO_DEFAULT,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "vision_fallback": vision_fallback,
+        "ocr_pages_threshold": _as_float(
+            pdf_config.get("ocr_pages_threshold"),
+            PDF_OCR_PAGES_THRESHOLD_DEFAULT,
+            minimum=0.0,
+            maximum=1.0,
+        ),
     }

@@ -314,19 +314,126 @@ def resolve_language(from_lang: str | None, installed: set[str] | None = None) -
 # Analysis
 # ============================================================
 
-def analyze_pdf(pdf_path) -> dict:
-    """Classify a PDF locally as ``text``, ``scan`` or ``mixed``.
+# A page with fewer characters than this and no imagery carries nothing worth
+# translating or looking at.
+BLANK_MIN_CHARS = 10
 
-    Built on ``pdf_text.page_text_stats`` so the definition of "has text" is the
-    exact one the fast path already uses -- there is only one threshold in the
-    codebase, not two that can drift.
-    """
+# Share of the page a single image must cover before the page is treated as a
+# classic scan, and before a figure/table is considered significant.
+SCAN_COVERAGE = 0.7
+FIGURE_COVERAGE = 0.4
+
+
+def _rect_area(bbox) -> float:
+    if not bbox:
+        return 0.0
+    x0, y0, x1, y1 = (float(value) for value in bbox[:4])
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
+def _image_coverage(infos, page_area: float) -> float:
+    covered = sum(_rect_area(info.get("bbox")) for info in infos)
+    return min(1.0, covered / page_area) if page_area else 0.0
+
+
+def _drawing_coverage(drawings, page_area: float) -> float:
+    covered = sum(_rect_area(item.get("rect")) for item in drawings)
+    return min(1.0, covered / page_area) if page_area else 0.0
+
+
+def _classify_page(chars, image_ratio, drawing_ratio, min_page_chars) -> str:
+    """Route one page to ``text``, ``scan``, ``figure`` or ``blank``."""
+    if chars < BLANK_MIN_CHARS and max(image_ratio, drawing_ratio) < FIGURE_COVERAGE:
+        return "blank"
+    if chars >= min_page_chars:
+        return "text"
+    if image_ratio >= SCAN_COVERAGE:
+        return "scan"
+    if max(image_ratio, drawing_ratio) >= FIGURE_COVERAGE:
+        return "figure"
+    return "text"
+
+
+def _profile_page(page, index: int, min_page_chars: int) -> dict:
     from app.pipeline import pdf_text
 
-    stats = pdf_text.page_text_stats(pdf_path)
-    total = int(stats["total_pages"])
-    with_text = int(stats["pages_with_text"])
-    ratio = float(stats["ratio"])
+    rect = page.rect
+    page_area = max(float(rect.width) * float(rect.height), 1.0)
+
+    try:
+        data = page.get_text("dict")
+    except Exception:  # noqa: BLE001
+        data = {"blocks": []}
+    blocks = [
+        block
+        for block in data.get("blocks", [])
+        if block.get("type") == 0 and block.get("lines")
+    ]
+    boxes = [tuple(block.get("bbox") or (0, 0, 0, 0)) for block in blocks]
+
+    text = page.get_text("text") or ""
+    chars = len(text.strip())
+    words = len(text.split())
+
+    text_area = sum(_rect_area(box) for box in boxes)
+    text_area_ratio = min(1.0, text_area / page_area)
+
+    try:
+        images = page.get_image_info() or []
+    except Exception:  # noqa: BLE001
+        images = []
+    try:
+        drawings = page.get_drawings() or []
+    except Exception:  # noqa: BLE001
+        drawings = []
+    image_ratio = _image_coverage(images, page_area)
+    drawing_ratio = _drawing_coverage(drawings, page_area)
+    groups = pdf_text.column_groups(boxes, rect)
+
+    return {
+        "page": index,
+        "chars": chars,
+        "words": words,
+        "blocks": len(blocks),
+        "images": len(images),
+        "drawings": len(drawings),
+        "text_area_ratio": round(text_area_ratio, 4),
+        "image_ratio": round(image_ratio, 4),
+        "drawing_ratio": round(drawing_ratio, 4),
+        "columns": len(groups) if groups else 1,
+        "kind": _classify_page(chars, image_ratio, drawing_ratio, min_page_chars),
+    }
+
+
+def profile_pages(pdf_path) -> list[dict]:
+    """Profile every page locally, without network calls.
+
+    One record per page, in document order. This is the single source of truth
+    for the phase 3 routing: ``analyze_pdf`` is derived from it, so "has text"
+    means exactly one thing across the codebase.
+    """
+    from app.core.config import get_pdf_config
+    from app.pipeline import pdf_text
+
+    min_page_chars = int(get_pdf_config()["min_page_chars"])
+    profile: list[dict] = []
+    with pdf_text._open_pdf(pdf_path) as document:
+        for index, page in enumerate(document):
+            profile.append(_profile_page(page, index, min_page_chars))
+    return profile
+
+
+def analyze_profile(profile, *, min_page_chars: int | None = None) -> dict:
+    """Summarize a page profile as ``text``, ``scan`` or ``mixed``."""
+    if min_page_chars is None:
+        from app.core.config import get_pdf_config
+
+        min_page_chars = int(get_pdf_config()["min_page_chars"])
+
+    total = len(profile)
+    with_text = sum(1 for item in profile if item["chars"] >= min_page_chars)
+    chars = sum(int(item["chars"]) for item in profile)
+    ratio = (with_text / total) if total else 0.0
 
     if total == 0 or with_text == 0:
         kind = "scan"

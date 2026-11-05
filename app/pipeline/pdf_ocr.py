@@ -47,6 +47,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 
@@ -446,10 +447,184 @@ def analyze_profile(profile, *, min_page_chars: int | None = None) -> dict:
         "kind": kind,
         "total_pages": total,
         "pages_with_text": with_text,
-        "chars": int(stats["chars"]),
+        "chars": chars,
         "ratio": ratio,
         "needs_ocr": kind != "text",
     }
+
+
+def analyze_pdf(pdf_path) -> dict:
+    """Classify a PDF locally as ``text``, ``scan`` or ``mixed``.
+
+    Built on :func:`profile_pages` so the definition of "has text" is the exact
+    one the fast path already uses -- there is only one threshold in the
+    codebase, not two that can drift.
+    """
+    return analyze_profile(profile_pages(pdf_path))
+
+
+# ============================================================
+# Quality gate
+# ============================================================
+
+def _longest_run(text: str) -> int:
+    longest = 0
+    current = 0
+    previous = ""
+    for char in text:
+        if char.isspace():
+            previous = ""
+            current = 0
+            continue
+        if char == previous:
+            current += 1
+        else:
+            previous = char
+            current = 1
+        longest = max(longest, current)
+    return longest
+
+
+def _is_garbage(char: str) -> bool:
+    """Symbols and control characters are what OCR noise is made of."""
+    category = unicodedata.category(char)
+    return category[0] in {"S", "C"}
+
+
+def page_quality(text, *, lang=None, config=None) -> dict:
+    """Judge whether OCR text is worth translating.
+
+    Deliberately simple, local and explainable: no model, no network, no
+    Tesseract confidence sidecar. ``lang`` is accepted for callers that already
+    know the OCR language and reserved for language-specific tuning; the
+    metrics below are script-agnostic.
+    """
+    from app.core.config import get_pdf_config
+
+    cfg = config or get_pdf_config()
+    stripped = (text or "").strip()
+    chars = len(stripped)
+
+    visible = [char for char in stripped if not char.isspace()]
+    garbage = sum(1 for char in visible if _is_garbage(char))
+    garbage_ratio = (garbage / len(visible)) if visible else 0.0
+
+    words = stripped.split()
+    avg_word_len = (sum(len(word) for word in words) / len(words)) if words else 0.0
+    single_char_ratio = (
+        sum(1 for word in words if len(word) == 1) / len(words)
+    ) if words else 0.0
+    repeat_run = _longest_run(stripped)
+
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    if chars < int(cfg["min_page_chars"]):
+        reasons.append(
+            f"too short: {chars} chars < {int(cfg['min_page_chars'])}"
+        )
+    if garbage_ratio > float(cfg["max_garbage_ratio"]):
+        reasons.append(
+            f"garbage ratio {garbage_ratio:.2f} > "
+            f"{float(cfg['max_garbage_ratio']):.2f}"
+        )
+    if single_char_ratio > 0.5:
+        reasons.append(f"single-character words {single_char_ratio:.2f} > 0.50")
+    if repeat_run > 8:
+        reasons.append(f"character run of {repeat_run} > 8")
+    if words and (avg_word_len < 2 or avg_word_len > 30):
+        warnings.append(f"unusual average word length {avg_word_len:.1f}")
+
+    return {
+        "ok": not reasons,
+        "chars": chars,
+        "garbage_ratio": round(garbage_ratio, 4),
+        "avg_word_len": round(avg_word_len, 2),
+        "single_char_ratio": round(single_char_ratio, 4),
+        "repeat_run": repeat_run,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
+# ============================================================
+# Routing
+# ============================================================
+
+def plan_pages(profile, *, ocr_available: bool, config=None) -> list[dict]:
+    """Decide the source of every page: text, ocr, vision or blank."""
+    from app.core.config import get_pdf_config
+
+    cfg = config or get_pdf_config()
+    plan: list[dict] = []
+    for item in profile:
+        kind = item.get("kind")
+        if kind == "blank":
+            source = "blank"
+        elif kind == "text":
+            source = "text"
+        elif kind == "figure":
+            source = "vision"
+        else:  # scan
+            source = "ocr" if ocr_available else "vision"
+        plan.append(
+            {
+                "page": int(item["page"]),
+                "kind": kind,
+                "source": source,
+                "chars": int(item.get("chars", 0)),
+            }
+        )
+
+    if cfg["vision_fallback"] == "file" and any(
+        entry["source"] == "vision" for entry in plan
+    ):
+        for entry in plan:
+            if entry["source"] != "blank":
+                entry["source"] = "vision"
+    return plan
+
+
+def apply_quality_gate(plan, pages_text, *, config=None) -> list[dict]:
+    """Demote OCR pages whose text fails the gate to the vision path."""
+    from app.core.config import get_pdf_config
+
+    cfg = config or get_pdf_config()
+    if not cfg["quality_gate"]:
+        return plan
+
+    for entry in plan:
+        if entry["source"] != "ocr":
+            continue
+        index = entry["page"]
+        text = pages_text[index] if 0 <= index < len(pages_text) else ""
+        quality = page_quality(text, config=cfg)
+        entry["quality"] = quality
+        if not quality["ok"]:
+            entry["source"] = "vision"
+
+    if cfg["vision_fallback"] == "file" and any(
+        entry["source"] == "vision" for entry in plan
+    ):
+        for entry in plan:
+            if entry["source"] != "blank":
+                entry["source"] = "vision"
+    return plan
+
+
+def fallback_to_vision(plan, *, config=None) -> list[dict]:
+    """Send every page that needed OCR to vision instead."""
+    from app.core.config import get_pdf_config
+
+    cfg = config or get_pdf_config()
+    for entry in plan:
+        if entry["source"] == "ocr":
+            entry["source"] = "vision"
+    if cfg["vision_fallback"] == "file":
+        for entry in plan:
+            if entry["source"] != "blank":
+                entry["source"] = "vision"
+    return plan
 
 
 # ============================================================

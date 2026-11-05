@@ -11,8 +11,9 @@ import uuid
 from pathlib import Path
 
 from app.calibration.documents import digest, prepare
-from app.calibration.engine import (TONES, VERSION, GLOSSARY_SYSTEM, compile_request,
-    cost_micros, parse_json, token_estimate, token_reservation, validate_result)
+from app.calibration.engine import (TONES, VERSION, GLOSSARY_SYSTEM, ModelOutputError,
+    compile_request, cost_micros, parse_json, token_estimate, token_reservation,
+    validate_result)
 from app.calibration.store import Store, Conflict, BudgetExceeded, now
 from app.core.config import get_openai_config, read_config_safe
 from app.core.models import is_supported_model, resolve_default_model
@@ -55,6 +56,26 @@ def validate_fallback_model(fallback_model, final_model):
     return fallback_model
 
 
+def corrective_request(request, error):
+    """Ask once more for the same slots after a rejected model answer.
+
+    The provider already answered (and was paid), so a structural mistake is
+    worth one repair attempt instead of aborting the whole book. The reminder
+    restates the exact contract that was broken.
+    """
+    messages = list(request["messages"]) + [{
+        "role": "user",
+        "content": (
+            f"The previous answer was rejected: {error}\n"
+            "Return exactly one translations entry for every supplied slot id, "
+            "in the same order. Never merge, split, drop or renumber slots, even "
+            "when a slot is a line fragment. Keep line breaks as \\n, never as "
+            "HTML tags. Return only the JSON object."
+        ),
+    }]
+    return {**request, "messages": messages}
+
+
 class CalibrationService:
     def __init__(self, database, root, client_factory=None, user_id: int = 1):
         self.user_id = int(user_id or 1)
@@ -70,11 +91,23 @@ class CalibrationService:
         # full CPU second per poll on a 3000-chunk book and starved the worker.
         self._quote_cache: dict[str, tuple[tuple, dict]] = {}
         self._quote_lock = threading.Lock()
+        # One HTTP client per provider identity keeps connections alive across
+        # the hundreds of calls a book needs; rebuilding it per call forced a
+        # new TLS handshake every time.
+        self._client_lock = threading.Lock()
+        self._client_cache: tuple[str, object] | None = None
 
     @staticmethod
     def _client():
         from openai import OpenAI
         return OpenAI(**get_openai_config(), max_retries=0, timeout=90)
+
+    def _client_for(self):
+        identity = provider_identity()
+        with self._client_lock:
+            if self._client_cache is None or self._client_cache[0] != identity:
+                self._client_cache = (identity, self.client_factory())
+            return self._client_cache[1]
 
     def recover(self):
         # Never automatically retry an operation that may have reached a provider.
@@ -306,7 +339,7 @@ class CalibrationService:
         reservation_cost = cost_micros(reserved - request["max_tokens"], request["max_tokens"], rate)
         attempt = self.store.reserve(session, reserved, reservation_cost, phase)
         try:
-            response = self.client_factory().chat.completions.create(**request)
+            response = self._client_for().chat.completions.create(**request)
         except BaseException:
             self.store.uncertain(attempt)
             raise
@@ -329,7 +362,7 @@ class CalibrationService:
         except Exception:
             pass
         if not response.choices or response.choices[0].finish_reason not in (None, "stop"):
-            raise ValueError("پاسخ مدل کامل نشد؛ نمونه را کوتاه‌تر کنید یا دوباره تلاش کنید.")
+            raise ModelOutputError("پاسخ مدل کامل نشد؛ نمونه را کوتاه‌تر کنید یا دوباره تلاش کنید.")
         return parse_json(response.choices[0].message.content)
 
     def translate_unit(self, session, unit, model, phase="sample"):
@@ -344,7 +377,11 @@ class CalibrationService:
             return {**cached, "reused": True}, compiled["key"]
         if not compiled["slots"]:
             return {"translations": [], "html": unit["source"], "plain": "", "model": model, "origin": "protected", "reused": True}, compiled["key"]
-        result = validate_result(compiled, self.call(session, compiled["request"], phase))
+        try:
+            result = validate_result(compiled, self.call(session, compiled["request"], phase))
+        except ModelOutputError as exc:
+            print(f"Repairing unit {compiled['key'][:10]}: {exc} [calibration]")
+            result = validate_result(compiled, self.call(session, corrective_request(compiled["request"], exc), phase))
         result.update(model=model, origin="model", reused=False, created_at=now())
         self.store.cache(compiled["key"], result)
         return result, compiled["key"]

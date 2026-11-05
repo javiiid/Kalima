@@ -11,6 +11,17 @@ from app.pipeline.semantic_chunker import _token_stream, estimate_tokens
 from app.glossary.service import matching_terms
 
 VERSION = "calibration-1"
+
+
+class ModelOutputError(ValueError):
+    """The provider answered, but the answer breaks the slot contract.
+
+    This is distinct from a provider/transport error: the call succeeded and was
+    paid for, so the unit is worth one corrective retry instead of failing the
+    whole book.
+    """
+
+
 TONES = {
     "modern": {"label": "روان و امروزی", "description": "فارسی طبیعی و روشن با حفظ معنای دقیق", "rules": "Use natural contemporary Persian. Improve readability without summarizing, omitting repetitions, or making formal passages casual."},
     "literary": {"label": "ادبی و تمثیلی", "description": "حفظ تصویرسازی، آهنگ و صدای نویسنده", "rules": "Preserve imagery, rhythm, narrator distance and distinct character voices. Never invent metaphors, ornament, emotion or explanation absent from the source."},
@@ -30,6 +41,7 @@ Do not add arbitrary bidi controls or diacritics. Preserve code, identifiers and
 The input contains text slots in document order. Read all slots together for context.
 Translate each slot into the same ID. Context is not part of the output.
 Do not merge or split slots. Slots may be parts of a sentence separated by inline markup.
+Slots may contain newline characters for line breaks; keep them as newlines, never as HTML tags.
 Return ONLY JSON: {{"translations": [{{"id": "t0", "text": "..."}}]}}.
 Return exactly the supplied IDs, each once, in order. No Markdown fences or HTML.
 """
@@ -55,6 +67,7 @@ def slots_for(source):
         raw = ''.join(pending)
         pending.clear()
         text = html.unescape(raw)
+        text = re.sub(r'[ \t]*\n[ \t]*', '\n', text)
         # Numbers, punctuation-only slots, and whitespace stay byte-exact.
         if not any(c.isalpha() for c in text):
             parts.append(raw)
@@ -69,6 +82,13 @@ def slots_for(source):
         raw = source[token.start:token.end]
         if token.kind == "text" and not protected:
             pending.append(raw)
+            continue
+        if token.name == "br" and token.kind in {"empty", "open"} and not protected:
+            # PDF-derived EPUBs use <br/> for visual line wraps. Making every
+            # line its own slot split sentences into fragments, the model merged
+            # them back, and the strict slot check then aborted the whole job.
+            # Keep the break inside one slot instead.
+            pending.append("\n")
             continue
         flush()
         parts.append(raw)
@@ -101,28 +121,37 @@ def parse_json(content):
     try:
         return json.loads(text)
     except (ValueError, TypeError) as exc:
-        raise ValueError("پاسخ مدل ساختار معتبر ندارد؛ دوباره تولید کنید.") from exc
+        raise ModelOutputError("پاسخ مدل ساختار معتبر ندارد؛ دوباره تولید کنید.") from exc
 
 
 def validate_result(compiled, result):
     if not isinstance(result, dict) or not isinstance(result.get("translations"), list):
-        raise ValueError("پاسخ ترجمه نامعتبر است.")
+        raise ModelOutputError("پاسخ ترجمه نامعتبر است.")
     translations = result["translations"]
     expected = [s["id"] for s in compiled["slots"]]
     if [s.get("id") for s in translations if isinstance(s, dict)] != expected or len(translations) != len(expected):
-        raise ValueError("تعداد یا ترتیب بندهای ترجمه تغییر کرده است؛ تأیید ممکن نیست.")
+        raise ModelOutputError("تعداد یا ترتیب بندهای ترجمه تغییر کرده است؛ تأیید ممکن نیست.")
     for source, translated in zip(compiled["slots"], translations):
         value = translated.get("text")
+        # A model that echoes a line break as <br/> is still faithful; normalize
+        # it to the newline the slot used instead of rejecting the answer.
+        if isinstance(value, str):
+            value = re.sub(r'<\s*br\s*/?\s*>', '\n', value, flags=re.I)
+            translated["text"] = value
         if not isinstance(value, str) or not value.strip() or len(value) > max(500, len(source["text"]) * 12):
-            raise ValueError("متن ترجمه خالی یا طول آن نامعتبر است.")
+            raise ModelOutputError("متن ترجمه خالی یا طول آن نامعتبر است.")
         if re.search(r'<\s*/?\w+[^>]*>', value):
-            raise ValueError("مدل به متن نشانه‌گذاری اضافه کرده است.")
+            raise ModelOutputError("مدل به متن نشانه‌گذاری اضافه کرده است.")
     plain = '\n'.join(t["text"] for t in translations)
     for term in compiled["terms"]:
         if term.get("locked") and term["target_term"].casefold() not in plain.casefold():
-            raise ValueError(f"معادل قفل‌شدهٔ «{term['source_term']}» در ترجمه رعایت نشده است.")
+            raise ModelOutputError(f"معادل قفل‌شدهٔ «{term['source_term']}» در ترجمه رعایت نشده است.")
     lookup = {t["id"]: t["text"].strip() for t in translations}
-    reconstructed = ''.join(p if isinstance(p, str) else p["leading"] + html.escape(lookup[p["id"]], quote=False) + p["trailing"] for p in compiled["parts"])
+    reconstructed = ''.join(
+        p if isinstance(p, str)
+        else p["leading"] + html.escape(lookup[p["id"]].replace("\r\n", "\n"), quote=False).replace("\n", "<br/>") + p["trailing"]
+        for p in compiled["parts"]
+    )
     return {"translations": translations, "html": reconstructed, "plain": plain}
 
 

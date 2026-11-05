@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from app.calibration.documents import digest, write_translation
@@ -81,25 +81,52 @@ def run_calibrated_job(service, job, on_started, on_progress):
     waiting = [u for u in units if u["id"] not in translations]
     fallback_chunks = []
     workers = max(1, min(12, int(get_translation_config().get("max_concurrency") or 3)))
-    # Bounded waves: no unlimited submission; completed paid responses are saved
-    # even when a stop arrives or another request in the same wave fails.
+    # Keep every worker busy: submit a new unit as soon as one finishes instead
+    # of waiting for the slowest request in a fixed wave. A single 90s straggler
+    # used to idle the other eleven workers for the whole wave.
+    failure = None
+    remaining = iter(waiting)
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for offset in range(0, len(waiting), workers):
+        pending = {}
+
+        def fill():
+            while len(pending) < workers and failure is None and not job.stop_event.is_set():
+                try:
+                    unit = next(remaining)
+                except StopIteration:
+                    return
+                pending[executor.submit(
+                    translate_unit_with_fallback, service, session, unit, model, fallback_model
+                )] = unit
+
+        fill()
+        while pending:
             if job.stop_event.is_set():
-                return {}
-            wave = waiting[offset:offset + workers]
-            futures = [(unit, executor.submit(translate_unit_with_fallback, service, session, unit, model, fallback_model)) for unit in wave]
-            failure = None
-            for unit, future in futures:
+                for future in pending:
+                    future.cancel()
+                pending.clear()
+                break
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                unit = pending.pop(future)
                 try:
                     result, _, fell_back = future.result()
                     commit(unit, result, fallback_model if fell_back else model)
-                    if fell_back:
-                        fallback_chunks.append(unit["id"])
                 except Exception as exc:
                     failure = failure or exc
-            if failure:
-                raise failure
+                    continue
+                if fell_back:
+                    fallback_chunks.append(unit["id"])
+            if failure is not None:
+                for future in pending:
+                    future.cancel()
+                pending.clear()
+                break
+            fill()
+    if failure is not None:
+        raise failure
+    if job.stop_event.is_set():
+        return {}
     if fallback_chunks:
         print(
             f"Fallback model {fallback_model} served "

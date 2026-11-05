@@ -672,6 +672,8 @@ def _translate_epub(
             "to continue. [translate]"
         )
 
+        return
+
     finally:
 
         # ====================================================
@@ -685,7 +687,7 @@ def _translate_epub(
             )
 
         # ====================================================
-        # DO NOT CLEAN INTERRUPTED JOB
+        # CLEANUP -- AN INTERRUPTED JOB KEEPS ITS TEMP FILES
         # ====================================================
 
         if interrupted:
@@ -695,13 +697,7 @@ def _translate_epub(
                 "for resume. [translate]"
             )
 
-            return
-
-        # ====================================================
-        # CLEANUP
-        # ====================================================
-
-        if success:
+        elif success:
 
             _cleanup_job(
                 client,
@@ -730,7 +726,6 @@ def _translate_epub(
                 "preserved for debugging/resume. "
                 "[translate]"
             )
-
 
     return manifest_outputs
 # ============================================================
@@ -1181,8 +1176,9 @@ def _translate_pdf(
                 "were preserved. [translate]"
             )
 
-
     return manifest_outputs
+
+
 # ============================================================
 # MAIN TRANSLATE FUNCTION
 # ============================================================
@@ -1408,7 +1404,7 @@ def translate(
             output_formats=output_formats,
             stop_event=stop_event,
             on_job_started=on_job_started,
-        style_preset=style_preset,
+            style_preset=style_preset,
             fallback_model=fallback_model,
             user_id=user_id,
         )
@@ -1432,7 +1428,7 @@ def translate(
             output_formats=output_formats,
             stop_event=stop_event,
             on_job_started=on_job_started,
-        style_preset=style_preset,
+            style_preset=style_preset,
             fallback_model=fallback_model,
             user_id=user_id,
         )

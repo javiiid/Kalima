@@ -88,7 +88,6 @@ def spend_usd(user_id: int, amount_usd: float, kind: str, reference_id: str = ""
     return charge(user_id, credits, kind, reference_id, amount_usd=amount,
                   require_positive=require_positive)
 
-
 def grant(user_id: int, credits: int, kind: str = "grant", reference_id: str = "",
           amount_usd: float = 0.0) -> dict:
     """Credit a balance and append a matching ledger row.

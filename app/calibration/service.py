@@ -64,6 +64,12 @@ class CalibrationService:
         self.client_factory = client_factory or self._client
         self.lock = threading.RLock()
         self.execution_lock = threading.RLock()
+        # The quote walks every unit in the book (parse, match glossary, hash),
+        # which is O(book). The UI polls the session once a second while a
+        # sample is being generated, so recomputing it per request burned a
+        # full CPU second per poll on a 3000-chunk book and starved the worker.
+        self._quote_cache: dict[str, tuple[tuple, dict]] = {}
+        self._quote_lock = threading.Lock()
 
     @staticmethod
     def _client():
@@ -132,6 +138,22 @@ class CalibrationService:
         profile = session["profile"]
         model = profile["final_model"]
         rate, provenance = self.rates(model)
+        budget = self.store.budget(session["budget_id"])
+        plan = digest([profile, session["document"]["prepared_hash"], session["selected"], session["outputs"], session["approvals"]])
+        # Everything the loop below depends on, cheap to compute. Results only
+        # grow (feedback replaces a key in place), so their count is enough to
+        # invalidate; budget counters change on every provider call.
+        fingerprint = (
+            plan, rate, provenance, len(session["results"]),
+            budget["sample_spent"], budget["full_spent"],
+            budget["sample_reserved"], budget["full_reserved"],
+            budget["sample_calls"], budget["cost_spent"], budget["cost_reserved"],
+        )
+        with self._quote_lock:
+            cached = self._quote_cache.get(session["id"])
+            if cached and cached[0] == fingerprint:
+                return cached[1]
+
         total_input, total_output, reusable, sample_cost, remaining_cost = 0, 0, 0, 0, 0
         for unit in session["document"]["units"]:
             compiled = compile_request(unit, profile, model)
@@ -148,18 +170,21 @@ class CalibrationService:
                 remaining_cost += cost or 0
                 if unit["id"] in session["selected"]:
                     sample_cost += cost or 0
-        b = self.store.budget(session["budget_id"])
-        plan = digest([profile, session["document"]["prepared_hash"], session["selected"], session["outputs"], session["approvals"]])
-        quote_id = digest([plan, rate, provenance, reusable, b["sample_spent"], b["full_spent"]])
-        return {"id": quote_id, "plan_hash": plan, "pricing": provenance, "rate": rate,
-                "input_tokens": total_input, "output_tokens": total_output, "reusable_units": reusable,
-                "remaining_cost_low": round(remaining_cost / 1e6 * .8, 6) if rate else None,
-                "remaining_cost_high": round(remaining_cost / 1e6 * 1.35, 6) if rate else None,
-                "sample_cost": sample_cost / 1e6 if rate else None,
-                "spent_cost": b["cost_spent"] / 1e6, "reserved_cost": b["cost_reserved"] / 1e6,
-                "spent_tokens": b["sample_spent"] + b["full_spent"],
-                "sample_spent_tokens": b["sample_spent"], "reserved_tokens": b["sample_reserved"] + b["full_reserved"],
-                "sample_calls": b["sample_calls"], "token_method": "conservative_estimate"}
+        quote_id = digest([plan, rate, provenance, reusable, budget["sample_spent"], budget["full_spent"]])
+        result = {"id": quote_id, "plan_hash": plan, "pricing": provenance, "rate": rate,
+                  "input_tokens": total_input, "output_tokens": total_output, "reusable_units": reusable,
+                  "remaining_cost_low": round(remaining_cost / 1e6 * .8, 6) if rate else None,
+                  "remaining_cost_high": round(remaining_cost / 1e6 * 1.35, 6) if rate else None,
+                  "sample_cost": sample_cost / 1e6 if rate else None,
+                  "spent_cost": budget["cost_spent"] / 1e6, "reserved_cost": budget["cost_reserved"] / 1e6,
+                  "spent_tokens": budget["sample_spent"] + budget["full_spent"],
+                  "sample_spent_tokens": budget["sample_spent"], "reserved_tokens": budget["sample_reserved"] + budget["full_reserved"],
+                  "sample_calls": budget["sample_calls"], "token_method": "conservative_estimate"}
+        with self._quote_lock:
+            if len(self._quote_cache) >= 64:
+                self._quote_cache.clear()
+            self._quote_cache[session["id"]] = (fingerprint, result)
+        return result
 
     def current_result(self, session, unit, model=None):
         compiled = compile_request(unit, session["profile"], model or session["profile"]["final_model"])

@@ -187,6 +187,82 @@ def test_tesseract_helper_functions_exist():
         assert callable(getattr(documents, name)), name
 
 
+# ============================================================
+# Phase 3 -- column-aware reading order and footnotes
+# ============================================================
+
+def _make_two_column_pdf(path: Path) -> Path:
+    """Two columns of body text plus a small-font footnote across the bottom."""
+    try:
+        import pymupdf
+    except ImportError:
+        import fitz as pymupdf  # type: ignore[no-redef]
+
+    document = pymupdf.open()
+    page = document.new_page(width=595, height=842)
+    for index in range(4):
+        page.insert_text(
+            (50, 100 + index * 30),
+            f"Left column line {index}.",
+            fontsize=11,
+        )
+        # Offset the right column so PyMuPDF keeps it in separate text blocks.
+        # A real typeset page does this naturally; a generated one merges two
+        # columns that share baselines into a single block.
+        page.insert_text(
+            (330, 160 + index * 30),
+            f"Right column line {index}.",
+            fontsize=11,
+        )
+    page.insert_text(
+        (50, 780),
+        "Footnote marker one.",
+        fontsize=7,
+    )
+    document.save(str(path))
+    document.close()
+    return path
+
+
+def test_layout_orders_columns_left_to_right(tmp_path):
+    pdf = _make_two_column_pdf(tmp_path / "columns.pdf")
+    pages = pdf_text.extract_pages_text_in_order(pdf, layout=True, rtl=False)
+    text = pages[0]
+    assert text.index("Left column line 3") < text.index("Right column line 0")
+
+
+def test_layout_orders_columns_right_to_left(tmp_path):
+    pdf = _make_two_column_pdf(tmp_path / "columns.pdf")
+    pages = pdf_text.extract_pages_text_in_order(pdf, layout=True, rtl=True)
+    text = pages[0]
+    assert text.index("Right column line 3") < text.index("Left column line 0")
+
+
+def test_layout_moves_footnotes_to_the_end(tmp_path):
+    pdf = _make_two_column_pdf(tmp_path / "columns.pdf")
+    pages = pdf_text.extract_pages_text_in_order(pdf, layout=True, rtl=False)
+    text = pages[0]
+    assert text.index("Footnote marker one") > text.index("Right column line 3")
+
+
+def test_layout_off_keeps_the_phase_two_text(tmp_path):
+    pdf = _make_two_column_pdf(tmp_path / "columns.pdf")
+    flat = pdf_text.extract_pages_text_in_order(pdf, layout=False)
+    assert flat == pdf_text.extract_pages_text(pdf)
+
+
+def test_build_chunks_can_limit_pages(tmp_path):
+    pdf = _make_pdf(tmp_path / "three.pdf", [LONG, LONG, LONG])
+    all_chunks, chapter_map, _ = pdf_text.build_chunks(pdf, pages=[1])
+    assert all_chunks
+    assert [chunk_id for chunk_id, _ in all_chunks] == [
+        f"chunk-{index}" for index in range(len(all_chunks))
+    ]
+    assert all(
+        chapter_map[chunk_id][0] == "page_1" for chunk_id, _ in all_chunks
+    )
+
+
 def test_tesseract_path_found_without_shell_path(monkeypatch):
     """Discovery must not depend on PATH already containing Tesseract."""
     import os

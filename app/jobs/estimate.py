@@ -253,6 +253,11 @@ def count_chunks(
     # honest answer is an estimate from the page count when we can get it, and
     # from the byte count otherwise.
     if path.suffix.lower() == ".pdf":
+        profile = _pdf_profile(path)
+        if profile:
+            tokens = _tokens_from_profile(profile)
+            if tokens:
+                return max(1, math.ceil(tokens / max_tokens)), tokens, False
         pages = _pdf_page_count(path)
         if pages:
             # ~450 tokens of prose per page, with a wide margin.
@@ -313,6 +318,42 @@ def _pdf_page_count(path: Path) -> int:
     except Exception:  # noqa: BLE001
         # A damaged or encrypted PDF. The caller falls back to the byte count.
         return 0
+
+
+def _pdf_profile(path: Path) -> list[dict]:
+    """Per-page profile for a mixed PDF, or an empty list when unavailable."""
+    try:
+        from app.pipeline import pdf_ocr
+
+        return pdf_ocr.profile_pages(path)
+    except Exception:  # noqa: BLE001
+        # A damaged/encrypted PDF, or PyMuPDF missing: fall back to page count.
+        return []
+
+
+# A page that has to go through OCR or vision costs roughly one page of prose
+# regardless of how much text it ends up carrying.
+PDF_NON_TEXT_PAGE_TOKENS = 450
+
+
+def _tokens_from_profile(profile: list[dict]) -> int:
+    """Estimate input tokens from what each page actually holds.
+
+    Text pages are priced from their real character count; scan and figure
+    pages are priced as one prose page, because that is what the vision/OCR
+    path sends. Blank pages cost nothing. This is what makes the estimate for
+    a mixed book stop looking like a fully text-bearing one.
+    """
+    total = 0
+    for item in profile:
+        kind = item.get("kind")
+        if kind == "blank":
+            continue
+        if kind == "text":
+            total += max(1, int(int(item.get("chars", 0)) / 4))
+        else:
+            total += PDF_NON_TEXT_PAGE_TOKENS
+    return total
 
 
 def _tokens_from_size(path: Path) -> int:

@@ -923,62 +923,104 @@ def _translate_pdf(
 
         pdf_cfg = get_pdf_config()
 
-        # Classify the file locally first. A PDF that already carries text rides
-        # the phase-1 fast path untouched; a scan or a mixed file gets one local
-        # OCRmyPDF pass (no API cost) and then rides the exact same path.
-        analysis = pdf_ocr.analyze_pdf(input_path)
+        layout_on = pdf_cfg["layout"] != "off"
+        rtl = _is_rtl_language(from_lang)
+
+        # Phase 3: the decision is per page, not per file. One scanned page no
+        # longer drags a whole text book to OCR, and one figure page no longer
+        # drags it to vision.
+        page_plan = _load_page_plan(paths, input_path)
         source_pdf = input_path
         ocr_report = {"used": False, "ok": False, "reason": ""}
+        ocr_seconds = 0.0
+        profile = None
 
-        use_text_fastpath = False
+        if page_plan is None:
 
-        if pdf_cfg["text_fastpath"] and analysis["kind"] == "text":
+            profile = pdf_ocr.profile_pages(input_path)
+            analysis = pdf_ocr.analyze_profile(profile)
 
-            use_text_fastpath = True
+            print(
+                f"PDF profile: {analysis['kind']} "
+                f"({analysis['pages_with_text']}/"
+                f"{analysis['total_pages']} pages with text). "
+                f"[translate]"
+            )
 
-        elif pdf_cfg["text_fastpath"] and pdf_cfg["ocr"] != "off":
+            ocr_ready = False
+            if pdf_cfg["text_fastpath"] and pdf_cfg["ocr"] != "off":
+                # "auto" runs OCR only when the tools are genuinely installed;
+                # "on" attempts it anyway and still degrades safely if it fails.
+                if pdf_cfg["ocr"] == "auto":
+                    ocr_ready = pdf_ocr.ocr_available(
+                        pdf_ocr.resolve_language(from_lang),
+                        work_dir=paths["job_dir"],
+                    )["available"]
+                else:
+                    ocr_ready = True
 
-            # "auto" runs OCR only when the tools are genuinely installed;
-            # "on" attempts it anyway and still degrades safely if it fails.
-            if pdf_cfg["ocr"] == "auto":
-                ocr_ready = pdf_ocr.ocr_available(
-                    pdf_ocr.resolve_language(from_lang),
-                    work_dir=paths["job_dir"],
-                )["available"]
+            if not pdf_cfg["text_fastpath"]:
+                # Explicit opt-out keeps the phase 2 behaviour: vision for all.
+                page_plan = [
+                    {
+                        "page": int(item["page"]),
+                        "kind": item["kind"],
+                        "source": (
+                            "blank" if item["kind"] == "blank" else "vision"
+                        ),
+                        "chars": int(item["chars"]),
+                    }
+                    for item in profile
+                ]
             else:
-                ocr_ready = True
-
-            if ocr_ready:
-
-                print(
-                    "PDF has no usable text layer; running "
-                    "local OCR (OCRmyPDF --skip-text, "
-                    "no API calls). [translate]"
+                page_plan = pdf_ocr.plan_pages(
+                    profile,
+                    ocr_available=ocr_ready,
+                    config=pdf_cfg,
                 )
 
+            ocr_pages = [
+                entry["page"]
+                for entry in page_plan
+                if entry["source"] == "ocr"
+            ]
+
+            if ocr_pages:
+
+                print(
+                    f"Running local OCR for {len(ocr_pages)} "
+                    f"page(s) (OCRmyPDF --skip-text, no API calls). "
+                    f"[translate]"
+                )
+
+                started = time.monotonic()
                 source_pdf, ocr_report = pdf_ocr.ensure_text_pdf(
                     input_path,
                     paths["job_dir"],
                     language=pdf_cfg["ocr_language"],
                     from_lang=from_lang,
                     timeout=pdf_cfg["ocr_timeout"],
+                    profile=profile,
+                    config=pdf_cfg,
                 )
+                ocr_seconds = time.monotonic() - started
 
                 if ocr_report.get("ok"):
 
-                    after = (
-                        ocr_report.get("analysis_after")
-                        or analysis
-                    )
-
-                    use_text_fastpath = (
-                        after.get("pages_with_text", 0) > 0
-                    )
-
                     print(
-                        f"OCR result: "
-                        f"{ocr_report.get('reason')} "
+                        f"OCR result: {ocr_report.get('reason')} "
                         f"[translate]"
+                    )
+
+                    pages_text = pdf_text.extract_pages_text_in_order(
+                        source_pdf,
+                        layout=layout_on,
+                        rtl=rtl,
+                    )
+                    page_plan = pdf_ocr.apply_quality_gate(
+                        page_plan,
+                        pages_text,
+                        config=pdf_cfg,
                     )
 
                 else:
@@ -988,47 +1030,92 @@ def _translate_pdf(
                         f"({ocr_report.get('reason')}); "
                         f"keeping the vision fallback. [translate]"
                     )
+                    page_plan = pdf_ocr.fallback_to_vision(
+                        page_plan,
+                        config=pdf_cfg,
+                    )
 
-            else:
-
+            elif pdf_cfg["ocr"] == "off" and any(
+                entry["kind"] == "scan" for entry in page_plan
+            ):
                 print(
-                    "OCRmyPDF/Tesseract not available; "
-                    "using the vision fallback. [translate]"
+                    "OCR is disabled; scanned pages use vision. "
+                    "[translate]"
                 )
 
-        if use_text_fastpath:
-
-            # A text-bearing PDF costs no API call to read. Extracting it here
-            # is what lets the file skip the per-page vision requests below.
-            print(
-                "PDF text fast path: extracting "
-                "text locally (no vision calls). "
-                "[translate]"
+            _save_page_plan(
+                paths,
+                input_path,
+                page_plan,
+                ocr_output=(
+                    source_pdf if source_pdf != input_path else None
+                ),
             )
-
-            (
-                all_chunks,
-                chapter_map,
-                chunk_contexts,
-            ) = pdf_text.build_chunks(source_pdf)
 
         else:
-
+            saved_ocr = page_plan.get("ocr_output")
+            if saved_ocr:
+                source_pdf = Path(saved_ocr)
+            page_plan = page_plan["pages"]
             print(
-                "PDF has no usable text layer; "
-                "falling back to vision. "
-                "[translate]"
+                "Reusing the saved per-page plan "
+                "(no re-profiling, no re-OCR). [translate]"
             )
 
-            all_chunks, chapter_map = (
-                PDFHandler.transcribe_pdf(
-                    client,
-                    input_path,
-                    paths,
-                    dpi=150,
-                    batch=False,
-                )
+        text_pages = [
+            entry["page"] for entry in page_plan if entry["source"] == "text"
+        ]
+        vision_pages = [
+            entry["page"] for entry in page_plan if entry["source"] == "vision"
+        ]
+
+        _write_pages_report(
+            paths,
+            input_path,
+            page_plan,
+            ocr_seconds=ocr_seconds,
+            ocr_report=ocr_report,
+        )
+
+        text_chunks, text_map, text_contexts = ([], {}, {})
+        if text_pages:
+            print(
+                f"PDF text fast path: extracting {len(text_pages)} "
+                f"page(s) locally (no vision calls). [translate]"
             )
+            text_chunks, text_map, text_contexts = pdf_text.build_chunks(
+                source_pdf,
+                layout=layout_on,
+                rtl=rtl,
+                pages=text_pages,
+            )
+
+        vision_chunks, vision_map = ([], {})
+        if vision_pages:
+            print(
+                f"Vision fallback for {len(vision_pages)} "
+                f"page(s). [translate]"
+            )
+            vision_chunks, vision_map = PDFHandler.transcribe_pdf(
+                client,
+                input_path,
+                paths,
+                dpi=150,
+                batch=False,
+                pages=vision_pages,
+            )
+
+        all_chunks, chapter_map, id_map = PDFHandler.merge_page_chunks(
+            (text_chunks, text_map),
+            (vision_chunks, vision_map),
+        )
+
+        if text_contexts:
+            chunk_contexts = {
+                id_map[(0, old_id)]: text
+                for old_id, text in text_contexts.items()
+                if (0, old_id) in id_map
+            }
 
         if not all_chunks:
 

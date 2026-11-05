@@ -12,13 +12,20 @@ class PDFHandler:
     """Handler for PDF file processing"""
 
     @staticmethod
-    def generate_page_images(pdf_path, output_dir, max_height=2000, dpi=150):
+    def generate_page_images(pdf_path, output_dir, max_height=2000, dpi=150, pages=None):
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True)
 
         with fitz.open(pdf_path) as pdf:
             page_count = len(pdf)
-            for page_num in range(page_count):
+            if pages is None:
+                page_numbers = list(range(page_count))
+            else:
+                page_numbers = sorted({
+                    int(page) for page in pages
+                    if 0 <= int(page) < page_count
+                })
+            for page_num in page_numbers:
                 page = pdf.load_page(page_num)
                 
                 # Calculate the scaling factor for the desired DPI
@@ -36,7 +43,7 @@ class PDFHandler:
                 pix.save(image_path)
                 #print(f"Saved image: {image_path}")
 
-        print(f"{page_count} pages saved as images in {output_dir.name}")
+        print(f"{len(page_numbers)} pages saved as images in {output_dir.name}")
 
     @staticmethod
     def encode_image(image_path):
@@ -173,7 +180,14 @@ class PDFHandler:
         PDFHandler.compress_pdf(temp_pdf_path, output_pdf_path)
 
     @staticmethod
-    def transcribe_pdf(client, input_pdf_path, paths, dpi=150, batch=False, model=None):
+    def transcribe_pdf(client, input_pdf_path, paths, dpi=150, batch=False, model=None, pages=None):
+        """Transcribe PDF pages with vision.
+
+        ``pages`` (0-based) limits rendering and requests to those pages, which
+        is how phase 3 sends only the figure/rejected pages of a mixed book to
+        the provider. Chunk ids carry the real page number; the caller merges
+        the groups with :func:`merge_page_chunks` to renumber them contiguously.
+        """
         # The vision call used to hardcode "gpt-5.6-terra", so every PDF paid
         # for the transcription step with a model the user never chose. Resolve
         # it the same way the rest of the pipeline does.
@@ -194,7 +208,7 @@ class PDFHandler:
             png_file.unlink()
 
         # Generate images of PDF pages
-        PDFHandler.generate_page_images(input_pdf_path, output_dir, dpi=dpi)
+        PDFHandler.generate_page_images(input_pdf_path, output_dir, dpi=dpi, pages=pages)
 
         all_chunks = []
         chapter_map = {}
@@ -243,12 +257,15 @@ class PDFHandler:
         #     print(f"Batch input file created at {batch_file_path}")
         #     return batch_file_path
 
-        # Process each image sequentially
-        for page_num, image_path in enumerate(sorted(output_dir.glob("*.png"))):
+        # Process each image sequentially. The page number comes from the file
+        # name, never from the render order, so a subset keeps its real page.
+        image_paths = sorted(output_dir.glob("page_*.png"))
+        for image_path in image_paths:
+            page_num = int(image_path.stem.split("_")[-1])
             base64_image = PDFHandler.encode_image(image_path)
             #print(f"Transcribing {image_path}")
 
-            print(f"Processing page {page_num + 1} of {len(list(output_dir.glob('*.png')))}")
+            print(f"Processing page {page_num + 1} of {len(image_paths)}")
 
             response = client.chat.completions.create(
                 model=model,
@@ -286,6 +303,56 @@ class PDFHandler:
             }
 
         return all_chunks, chapter_map
+
+
+_PAGE_INDEX_RE = re.compile(r"page_(\d+)")
+
+
+def _page_index(item: str) -> int:
+    match = _PAGE_INDEX_RE.search(str(item or ""))
+    return int(match.group(1)) if match else 10 ** 9
+
+
+def merge_page_chunks(*groups):
+    """Merge page-ordered chunk groups into contiguous ``chunk-0..N`` ids.
+
+    Each group is ``(chunks, chapter_map)`` as produced by ``pdf_text`` or
+    ``PDFHandler.transcribe_pdf``. Chunks are ordered by their source page and
+    then by position inside the page, so a book mixing locally extracted text
+    with vision pages keeps the document order.
+
+    Returns ``(all_chunks, chapter_map, id_map)``. ``id_map`` maps
+    ``(group_index, old_chunk_id)`` to the new id, which lets the caller carry
+    per-chunk context across the renumbering. Ids must stay contiguous because
+    ``save_translated_pdf`` orders pages by ``int(chunk_id.split('-')[1])``.
+    """
+    merged = []
+    for group_index, (chunks, chapter_map) in enumerate(groups):
+        for chunk_id, text in chunks or []:
+            location = (chapter_map or {}).get(chunk_id)
+            if isinstance(location, dict):
+                item = str(location.get("item", "") or "")
+                position = int(location.get("pos", 0) or 0)
+            elif isinstance(location, (tuple, list)) and location:
+                item = str(location[0])
+                position = int(location[1]) if len(location) > 1 else 0
+            else:
+                item, position = "", 0
+            merged.append((_page_index(item), position, len(merged), group_index, chunk_id, text, item))
+
+    merged.sort(key=lambda row: (row[0], row[1], row[2]))
+
+    all_chunks = []
+    chapter_map = {}
+    id_map = {}
+    for counter, row in enumerate(merged):
+        _, position, _, group_index, old_id, text, item = row
+        chunk_id = f"chunk-{counter}"
+        all_chunks.append((chunk_id, text))
+        chapter_map[chunk_id] = (item, position)
+        id_map[(group_index, old_id)] = chunk_id
+    return all_chunks, chapter_map, id_map
+
 
 if __name__ == "__main__":
     PDFHandler.main()

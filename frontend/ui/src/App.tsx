@@ -7,6 +7,7 @@ import { WorkspacePage } from '@/pages/WorkspacePage'
 import { LibraryPage } from '@/pages/LibraryPage'
 import { ReaderPage } from '@/pages/ReaderPage'
 import { AccountPage } from '@/pages/AccountPage'
+import { SettingsPage } from '@/pages/SettingsPage'
 import { AuthPage } from '@/pages/AuthPage'
 import { LandingPage } from '@/pages/LandingPage'
 import { NotFoundPage } from '@/pages/PendingPage'
@@ -81,6 +82,7 @@ export function App() {
             ahead of the SPA fallback. The proxy is now `/api` and `/downloads`
             only, so the path belongs to React and the page exists. */}
         <Route path="/account" element={<AccountPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<AuthPage />} />
         <Route path="/landing" element={<LandingPage />} />

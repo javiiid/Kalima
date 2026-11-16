@@ -6,6 +6,7 @@
  * `npm run check:api` re-captures and the diff shows the drift.
  */
 import type { AuthEvent, AuthMeResponse, AuthResponse, AuthSession } from './auth.ts'
+import type { Preferences, PreferencesMeta, PreferencesPatch } from './preferences.ts'
 
 export type JobStatus =
   | 'queued'
@@ -787,6 +788,25 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  /* --- preferences -------------------------------------------------- */
+  /**
+   * The settings page's contract.
+   *
+   * `meta` carries the resolved default model and the option lists (style
+   * presets, timezones, notification events) so no component has to hardcode
+   * them. `update` takes a partial patch of changed fields only, and `reset`
+   * drops this user's preference rows -- the reader's place in a book and their
+   * bookmarks are deliberately not touched, see `reset_preferences` server-side.
+   */
+  preferences: () => request<{ value: Preferences; meta: PreferencesMeta }>('/api/preferences'),
+  updatePreferences: (patch: PreferencesPatch) =>
+    request<{ ok: boolean; value: Preferences }>('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+  resetPreferences: () =>
+    request<{ ok: boolean; value: Preferences }>('/api/preferences', { method: 'DELETE' }),
   models: () => request<{ items: Model[] }>('/api/models'),
   languages: () => request<{ items: Language[] }>('/api/languages'),
   providerConfig: () => request<ProviderConfig>('/api/provider-config'),

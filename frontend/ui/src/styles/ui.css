@@ -1,0 +1,438 @@
+/* ==========================================================================
+   Shared control primitives.
+
+   Switch, Slider, SegmentedControl and Tabs have no native equivalent that
+   looks like this product, so each is a small hand-built control. They live
+   here rather than in a page stylesheet because more than one page will use
+   them; every colour is a token, so both themes come for free and
+   `tests/tokens.contrast.test.ts` keeps covering the pairs.
+
+   Nothing here is decorative: each rule exists because the control needs it
+   (a hit area, a focus ring, a state). `prefers-reduced-motion` and the
+   "animations off" preference both land on `[data-motion='off']`, set by
+   `useDensity`/`useMotion`.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Switch
+   The track is the visual; the 44px row is the target. `role="switch"` carries
+   the state, so colour is a reinforcement and never the only cue.
+   -------------------------------------------------------------------------- */
+.ui-switch {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 26px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-badge);
+  background: var(--color-surface-sunken);
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
+}
+
+.ui-switch[aria-checked='true'] {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.ui-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ui-switch:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.ui-switch-knob {
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 3px rgba(7, 20, 38, 0.28);
+  transition: inset-inline-start 0.15s var(--ease-out);
+}
+
+.ui-switch[aria-checked='true'] .ui-switch-knob {
+  inset-inline-start: 20px;
+  background: var(--color-surface-inverse);
+}
+
+/* A save in flight: a quiet dot, never a lock. A control that freezes while
+   the server thinks is worse than one that shows the truth a moment later. */
+.ui-switch[data-pending='true'] {
+  opacity: 0.75;
+}
+
+/* --------------------------------------------------------------------------
+   Select
+   The native element is kept (a phone's own picker is better than anything
+   built here); the wrapper only draws the chevron and the focus ring.
+   -------------------------------------------------------------------------- */
+.ui-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-select select {
+  appearance: none;
+  padding-inline-end: var(--spacing-8);
+  width: 100%;
+}
+
+.ui-select-chevron {
+  position: absolute;
+  inset-inline-end: var(--spacing-3);
+  pointer-events: none;
+  color: var(--color-text-muted);
+}
+
+.ui-select[data-invalid='true'] select {
+  border-color: var(--color-error);
+}
+
+/* --------------------------------------------------------------------------
+   Slider
+   A range input plus the value in words. The value is always visible, not only
+   during a drag: a slider whose value appears only while you hold it asks the
+   reader to remember a number.
+   -------------------------------------------------------------------------- */
+.ui-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+
+.ui-slider input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 6rem;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  accent-color: var(--color-primary);
+}
+
+.ui-slider input[type='range']:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.ui-slider input[type='range']:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ui-slider-value {
+  flex: none;
+  min-width: 3.5rem;
+  padding: 2px var(--spacing-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-subtle);
+  color: var(--color-text-brand);
+  font-size: var(--text-label);
+  font-weight: 700;
+  text-align: center;
+  /* A number is not prose; it must not reorder with the interface direction. */
+  direction: ltr;
+}
+
+.ui-slider-reset {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.ui-slider-reset:hover:not(:disabled) {
+  color: var(--color-text-brand);
+  background: var(--color-primary-subtle);
+}
+
+.ui-slider-reset:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.ui-slider-reset:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Segmented control
+   Two to four options, all visible, one selected. A radiogroup rather than
+   buttons, because that is what it is.
+   -------------------------------------------------------------------------- */
+.ui-segmented {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+}
+
+.ui-segmented-option {
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 0;
+  border-inline-start: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ui-segmented-option:first-child {
+  border-inline-start: 0;
+}
+
+.ui-segmented-option[aria-checked='true'] {
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.ui-segmented-option:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.ui-segmented-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* --------------------------------------------------------------------------
+   Tabs
+   Vertical in the rail position on a wide screen, a horizontal strip below it.
+   One tablist, one model, two layouts -- so the keyboard contract is the same
+   at every width.
+   -------------------------------------------------------------------------- */
+.ui-tabs {
+  display: flex;
+  gap: var(--spacing-1);
+  overflow-x: auto;
+  padding-bottom: var(--spacing-1);
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.ui-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  flex: none;
+  min-height: 40px;
+  padding-inline: var(--spacing-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  scroll-snap-align: start;
+}
+
+.ui-tab[aria-selected='true'] {
+  background: var(--color-primary-subtle);
+  color: var(--color-text-brand);
+}
+
+.ui-tab:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+@media (min-width: 64rem) {
+  .ui-tabs {
+    flex-direction: column;
+    overflow-x: visible;
+    padding-bottom: 0;
+  }
+
+  .ui-tab {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .ui-tab[aria-selected='true'] {
+    /* The reading-start edge, matching the rail's own active marker. */
+    box-shadow: inset -2px 0 0 0 var(--color-primary);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Setting row
+   Label, hint and error on one side; the control on the other. This is the
+   whole visual grammar of the settings page.
+   -------------------------------------------------------------------------- */
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding-block: var(--spacing-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.setting-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.setting-row-text {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.setting-row-label {
+  display: block;
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.setting-row-hint {
+  margin: 2px 0 0;
+  font-size: var(--text-caption);
+  line-height: 1.7;
+  color: var(--color-text-muted);
+}
+
+.setting-row-error {
+  margin: 4px 0 0;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--color-error);
+}
+
+.setting-row-control {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* A control that needs the whole width on a phone (a slider, a select with a
+   long zone name) rather than being squeezed beside its label. */
+.setting-row.wide .setting-row-control {
+  flex: 1 1 12rem;
+}
+
+/* --------------------------------------------------------------------------
+   Save bar
+   -------------------------------------------------------------------------- */
+.save-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-elevated);
+}
+
+.save-bar-status {
+  font-size: var(--text-label);
+  color: var(--color-text-secondary);
+}
+
+.save-bar-actions {
+  margin-inline-start: auto;
+  display: flex;
+  gap: var(--spacing-2);
+}
+
+@media (max-width: 40rem) {
+  .save-bar {
+    position: sticky;
+    inset-block-end: 0;
+    z-index: 20;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .save-bar-actions {
+    margin-inline-start: 0;
+  }
+
+  .save-bar-actions .btn {
+    flex: 1;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Motion
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .ui-switch,
+  .ui-switch-knob {
+    transition: none;
+  }
+}
+
+[data-motion='off'] .ui-switch,
+[data-motion='off'] .ui-switch-knob {
+  transition: none;
+}
+/* --------------------------------------------------------------------------
+   Field
+   A labelled control outside a SettingRow (a text input, a webhook URL).
+   -------------------------------------------------------------------------- */
+.field-group {
+  display: grid;
+  gap: var(--spacing-1);
+  min-width: 0;
+}
+
+.field-hint {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: 1.7;
+  color: var(--color-text-muted);
+}
+
+.field-error {
+  margin: 0;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--color-error);
+}
+
+/* --------------------------------------------------------------------------
+   Density
+   Compact trims spacing, never type size or line height: Persian joins its
+   letters, and 1.7 is the floor at which the shapes stay apart. Set on <html>
+   by useDensity, so every page follows the preference, not only this one.
+   -------------------------------------------------------------------------- */
+[data-density='compact'] .setting-row {
+  padding-block: var(--spacing-2);
+}
+
+[data-density='compact'] .page {
+  padding-block: var(--spacing-4);
+}

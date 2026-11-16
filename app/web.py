@@ -76,6 +76,19 @@ from app.account import billing as account_billing
 from app.library.view import library_page
 from app.library import covers as book_covers
 from app.library import shelves as book_shelves
+from app.preferences.reading import (
+    READING_DEFAULTS,
+    clean_reading_settings,
+    reading_setting_key,
+    reading_settings,
+)
+from app.preferences.service import (
+    PreferenceError,
+    get_preferences,
+    preferences_meta,
+    reset_preferences,
+    save_preferences,
+)
 from app.auth.service import (
     SESSION_COOKIE,
     SESSION_DAYS,
@@ -970,48 +983,6 @@ def dashboard_summary(user_id: int = 1) -> dict:
     }
 
 
-READING_DEFAULTS = {
-    "study_night_mode": False,
-    "reading_theme": "light",
-    "reading_mode": "translation",
-    "reading_font_size": 18,
-    "reading_line_height": 1.9,
-    "reading_width": 760,
-    "reading_direction": "auto",
-    "reading_last_location": None,
-    "reading_bookmarks": [],
-    "reading_glossary": True,
-}
-
-
-def reading_settings(user_id: int | None = None) -> dict:
-    uid = int(user_id if user_id is not None else book_shelves.resolve_user_id(db))
-    values = dict(READING_DEFAULTS)
-    prefix = "" if uid == int(book_shelves.resolve_user_id(db)) else f"u{uid}:"
-    if prefix:
-        rows = db.fetch_all(
-            "SELECT key, value_json FROM settings WHERE key LIKE ? OR key=?",
-            (prefix + "reading_%", prefix + "study_night_mode"),
-        )
-    else:
-        rows = db.fetch_all(
-            "SELECT key, value_json FROM settings WHERE (key LIKE 'reading_%' OR key='study_night_mode')"
-            " AND key NOT LIKE 'u%:%'"
-        )
-    for row in rows:
-        key = row["key"][len(prefix):] if prefix else row["key"]
-        try:
-            values[key] = json.loads(row["value_json"])
-        except (TypeError, json.JSONDecodeError):
-            continue
-    return values
-
-
-def reading_setting_key(user_id: int, key: str) -> str:
-    uid = int(user_id)
-    return key if uid == int(book_shelves.resolve_user_id(db)) else f"u{uid}:{key}"
-
-
 def _library_user_id(token: str = "") -> int:
     """User id for library reads/writes.
 
@@ -1848,6 +1819,9 @@ class Handler(BaseHTTPRequestHandler):
             except LookupError as exc: self._json({'error': str(exc)}, 404)
             except ValueError as exc: self._json({'error': str(exc)}, 400)
             return
+        if parsed.path == "/api/preferences":
+            uid = self._user_id()
+            self._json({"value": get_preferences(uid), "meta": preferences_meta(uid)}); return
         if parsed.path == "/api/reader/settings":
             self._json({"value": reading_settings(self._user_id())}); return
         if parsed.path.startswith("/api/reader/") and parsed.path.endswith("/glossary"):
@@ -2804,18 +2778,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"error": _friendly_error(exc)}, 502); return
         if path == "/api/reader/settings":
-            allowed = set(READING_DEFAULTS)
-            clean = {key: value for key, value in body.items() if key in allowed}
-            if "reading_font_size" in clean: clean["reading_font_size"] = max(14, min(30, int(clean["reading_font_size"])))
-            if "reading_line_height" in clean: clean["reading_line_height"] = max(1.4, min(2.6, float(clean["reading_line_height"])))
-            if "reading_width" in clean: clean["reading_width"] = max(560, min(1000, int(clean["reading_width"])))
-            if "reading_direction" in clean and clean["reading_direction"] not in {"auto", "rtl", "ltr"}: clean["reading_direction"] = "auto"
-            if "reading_theme" in clean and clean["reading_theme"] not in {"light", "night", "sepia", "contrast"}: clean["reading_theme"] = "light"
-            if "reading_glossary" in clean: clean["reading_glossary"] = bool(clean["reading_glossary"])
-            if "reading_bookmarks" in clean: clean["reading_bookmarks"] = reader_clean_bookmarks(clean["reading_bookmarks"])
-            if "reading_mode" in clean and clean["reading_mode"] not in {"translation", "bilingual", "columns", "original"}: clean["reading_mode"] = "translation"
+            # The clamps live in app/preferences/reading.py so the reader and
+            # the settings page cannot disagree about what a valid value is.
+            try: clean = clean_reading_settings(body, clean_bookmarks=reader_clean_bookmarks)
+            except ValueError as exc: self._json({"error": str(exc)}, 400); return
             for key, value in clean.items(): db.execute("INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at", (reading_setting_key(self._user_id(), key), json.dumps(value, ensure_ascii=False), now()))
             self._json({"ok": True, "value": reading_settings(self._user_id())}); return
+        if path == "/api/preferences":
+            try: value = save_preferences(self._user_id(), body)
+            except PreferenceError as exc: self._json({"error": str(exc), "field": exc.field}, 400); return
+            self._json({"ok": True, "value": value}); return
         if path == "/api/settings":
             if not self._is_admin():
                 self._json({"error": "تنظیمات سراسری فقط برای مدیر سرور است."}, 403); return
@@ -2857,6 +2829,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         if not self._guarded(): return
         path = urlparse(self.path).path
+        if path == "/api/preferences":
+            self._json({"ok": True, "value": reset_preferences(self._user_id())}); return
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0:2] == ["api", "jobs"]:
             job = self._job(parts[2])

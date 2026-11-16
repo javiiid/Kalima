@@ -130,6 +130,26 @@ function GlobeIcon() {
  * different font -- an emoji-style sun on phones, a hairline half-circle on
  * Windows -- and neither matched the rail's outline icons.
  */
+function GearIcon() {
+  return (
+    <svg
+      width={18}
+      height={18}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
+    </svg>
+  )
+}
+
 function ThemeIcon({ dark }: { dark: boolean }) {
   return (
     <svg
@@ -233,6 +253,15 @@ export function Sidebar() {
           of the navigation above and easy to find in one fixed spot. */}
       <div className="mt-auto flex justify-center pb-3">
         <span className="tool-cluster">
+          <NavLink
+            to="/settings"
+            aria-label={t('nav.settings')}
+            title={t('nav.settings')}
+            className="btn-icon"
+          >
+            <GearIcon />
+          </NavLink>
+          <span className="tool-divider" aria-hidden="true" />
           <ThemeToggle />
           <span className="tool-divider" aria-hidden="true" />
           <LanguageToggle />

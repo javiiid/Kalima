@@ -46,8 +46,8 @@ def isolated_db(tmp_path, monkeypatch):
     # Modules that did `from app.storage.database import db` at their top
     # level hold the old object; rebind them when already imported. Modules
     # imported later (e.g. app.web inside a test) pick up the patched
-    # db_module.db naturally — except these two, which bind at import.
-    for module_name in ("app.web", "app.account.service"):
+    # db_module.db naturally — except the ones listed here, which bind at import.
+    for module_name in ("app.web", "app.account.service", "app.preferences.service", "app.preferences.reading"):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "db"):
             monkeypatch.setattr(module, "db", tmp_db)

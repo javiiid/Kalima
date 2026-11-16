@@ -949,6 +949,12 @@ export function AccountPage() {
         </p>
       </header>
 
+      <div className="mb-5">
+        <Link to="/settings" className="btn btn-secondary">
+          {t('settings.backToAccount')}
+        </Link>
+      </div>
+
       <AppearancePanel />
       <SetupPanel config={config.data} />
       <WorkPanel portal={data} />

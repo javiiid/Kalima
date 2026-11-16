@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from './App'
 import { applyStoredTheme } from './hooks/useTheme'
+import { applyStoredAppearance } from './hooks/useDensity'
 import { applyStoredLanguage } from './i18n/state.ts'
 import { LanguageProvider } from './i18n/language.tsx'
 import { setLocale } from './lib/locale.ts'
@@ -14,10 +15,12 @@ import { installCsrf } from './lib/csrf.ts'
 import './styles/fonts.generated.css'
 import './styles/fonts-latin.css'
 import './styles/tokens.css'
+import './styles/ui.css'
 
 // Must run before the first paint, otherwise a dark-mode user sees a white
 // flash while React boots -- and an English user sees an RTL flash.
 applyStoredTheme()
+applyStoredAppearance()
 setLocale(applyStoredLanguage())
 
 // Cookie-authenticated writes must echo the CSRF cookie in a header (Phase 1).

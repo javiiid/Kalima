@@ -1,0 +1,310 @@
+/* ==========================================================================
+   Settings page layout.
+
+   One column below 64rem (tabs scroll horizontally, as `ui-tabs` already
+   does), a sticky rail beside the panel above it. Every colour is a token, so
+   the page follows the app theme and `tests/tokens.contrast.test.ts` keeps
+   covering the pairs.
+   ========================================================================== */
+
+.settings-page {
+  max-width: 76rem;
+}
+
+.settings-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  margin-bottom: var(--spacing-5);
+}
+
+.settings-title {
+  margin: 0;
+  font-size: var(--text-h1);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+
+.settings-subtitle {
+  margin: var(--spacing-1) 0 0;
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.settings-loading {
+  margin-bottom: var(--spacing-4);
+  color: var(--color-text-muted);
+}
+
+.settings-layout {
+  display: grid;
+  gap: var(--spacing-4);
+  min-width: 0;
+}
+
+.settings-nav {
+  min-width: 0;
+}
+
+.settings-panel {
+  min-width: 0;
+  display: grid;
+  gap: var(--spacing-4);
+}
+
+.settings-panel:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 4px;
+  border-radius: var(--radius-card);
+}
+
+@media (min-width: 64rem) {
+  .settings-layout {
+    grid-template-columns: 15rem minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .settings-nav {
+    position: sticky;
+    top: var(--spacing-4);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Cards
+   -------------------------------------------------------------------------- */
+
+.settings-card {
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+}
+
+.settings-card-title {
+  margin: 0;
+  font-size: var(--text-h3);
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.settings-card-hint {
+  margin: var(--spacing-1) 0 var(--spacing-3);
+  font-size: var(--text-caption);
+  line-height: 1.8;
+  color: var(--color-text-muted);
+}
+
+.settings-inline-status {
+  min-height: 1.5em;
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--color-text-brand);
+}
+
+.settings-field-block {
+  padding-block: var(--spacing-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.settings-field-block:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Notifications events
+   -------------------------------------------------------------------------- */
+
+.settings-events {
+  margin: 0;
+  padding-inline: 0;
+  border-inline: 0;
+  border-bottom: 0;
+}
+
+.settings-events-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-2);
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  min-height: 44px;
+  padding-inline: var(--spacing-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  font-size: var(--text-label);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.settings-checkbox:has(input:checked) {
+  border-color: var(--color-primary);
+  background: var(--color-primary-subtle);
+}
+
+.settings-checkbox input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--color-primary);
+}
+
+@media (min-width: 40rem) {
+  .settings-events-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Reading preview
+   -------------------------------------------------------------------------- */
+
+.settings-reading-preview-wrap {
+  margin-top: var(--spacing-4);
+}
+
+.settings-preview-title {
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--text-label);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.settings-reading-preview {
+  display: flex;
+  justify-content: center;
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  overflow-wrap: break-word;
+}
+
+.settings-reading-preview-inner {
+  width: 100%;
+  min-width: 0;
+}
+
+.settings-reading-preview-inner p {
+  margin: 0 0 var(--spacing-3);
+}
+
+.settings-reading-preview-inner p:last-child {
+  margin-bottom: 0;
+}
+
+.settings-reading-preview-original {
+  padding-bottom: var(--spacing-2);
+  border-bottom: 1px dashed var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.85em;
+}
+
+/* --------------------------------------------------------------------------
+   Data tab
+   -------------------------------------------------------------------------- */
+
+.settings-data-grid,
+.settings-danger-zone {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-3);
+}
+
+.settings-danger-zone {
+  margin-top: var(--spacing-4);
+  padding-top: var(--spacing-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.settings-data-action {
+  display: grid;
+  align-content: start;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-elevated);
+}
+
+.settings-data-action-title {
+  margin: 0;
+  font-size: var(--text-label);
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.settings-data-action .settings-card-hint {
+  margin: 0;
+}
+
+.settings-data-action .btn {
+  justify-self: start;
+}
+
+@media (min-width: 48rem) {
+  .settings-data-grid,
+  .settings-danger-zone {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Dialog
+   -------------------------------------------------------------------------- */
+
+.settings-dialog {
+  width: min(32rem, calc(100vw - 2rem));
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-raised);
+}
+
+.settings-dialog::backdrop {
+  background: rgba(7, 20, 38, 0.5);
+}
+
+.settings-dialog-title {
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--text-h3);
+  font-weight: 700;
+}
+
+.settings-dialog-body {
+  display: grid;
+  gap: var(--spacing-3);
+  font-size: var(--text-label);
+  line-height: 1.8;
+  color: var(--color-text-secondary);
+}
+
+.settings-dialog-body p {
+  margin: 0;
+}
+
+.settings-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-4);
+}
+
+@media (max-width: 40rem) {
+  .settings-dialog-actions .btn {
+    flex: 1;
+  }
+}

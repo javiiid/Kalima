@@ -55,6 +55,21 @@ def load_preset(style: str | None = None) -> dict:
     return presets.get(style, presets.get("literary", {}))
 
 
+def resolve_style_key(style: str | None = None) -> str:
+    """Return the preset key ``load_preset`` would actually use.
+
+    Translation memory keys on the resolved key, so ``None`` (configured
+    default) and the explicit default name hash to the same profile.
+    """
+    presets = _load_presets()
+    if style is None:
+        style = (
+            (read_config_safe().get("translation") or {})
+            .get("style_preset", "literary")
+        )
+    return style if style in presets else "literary"
+
+
 def get_presets() -> dict:
     """Return all presets."""
     return _load_presets()

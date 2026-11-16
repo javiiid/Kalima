@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from app.translation.prompts import get_translation_prompt
-from app.glossary.service import load_snapshot, glossary_prompt, check_translation
+from app.glossary.service import (
+    load_snapshot,
+    glossary_prompt,
+    check_translation,
+    matching_terms,
+)
 from app.glossary.automatic import learn_chunk
 
 from app.jobs.state import save_translations
@@ -509,12 +514,55 @@ Return only the translated text.
 # SINGLE CHUNK TRANSLATION
 # ============================================================
 
+def _memory_profile(
+    *,
+    model: str,
+    filetype: str,
+    system_prompt_text: str | None,
+    style_preset: str | None,
+    text: str,
+    glossary_snapshot: Any,
+    from_lang: str,
+    to_lang: str,
+) -> dict:
+    """Describe the translation profile that keys the memory for this chunk.
+
+    Everything that can change the output for the same source text belongs
+    here: the model, the effective prompt, the style preset and the glossary
+    terms that actually match this chunk. Two runs that differ in any of
+    these must not share a memory row.
+    """
+    from app.presets.manager import load_preset, resolve_style_key
+    from app.translation.memory import build_profile
+    from app.translation.prompts import PROMPT_SCHEMA_VERSION
+
+    snapshot = glossary_snapshot or {}
+    style_key = resolve_style_key(style_preset)
+    system_message = _build_system_message(
+        from_lang=from_lang,
+        to_lang=to_lang,
+        filetype=filetype,
+        system_prompt_text=system_prompt_text,
+    )
+    return build_profile(
+        model=model,
+        filetype=filetype,
+        prompt=system_message,
+        prompt_version=PROMPT_SCHEMA_VERSION,
+        style_key=style_key,
+        style_preset=load_preset(style_key),
+        glossary_terms=matching_terms(text, snapshot),
+        glossary_version=snapshot.get("version", 0),
+    )
+
+
 def _remember_chunk(
     memory_db: Any,
     source_text: str,
     translated_text: str,
     from_lang: str,
     to_lang: str,
+    profile: dict,
     user_id: int = 1,
 ) -> None:
     """Write one engine-produced pair back to memory. Never raises."""
@@ -528,7 +576,7 @@ def _remember_chunk(
             from app.storage.database import db as database
         _memory_store(
             database, source_text, translated_text, from_lang, to_lang,
-            user_id=int(user_id or 1),
+            profile=profile, user_id=int(user_id or 1),
         )
     except Exception:
         pass
@@ -647,10 +695,32 @@ def translate_chunk(
         )
 
     # ========================================================
-    # TRANSLATION MEMORY (exact match, before any API call)
+    # BUILD SYSTEM PROMPT
     # ========================================================
 
-    if test_translations is None and memory_db is not False:
+    system_message = _build_system_message(
+        from_lang=from_lang,
+        to_lang=to_lang,
+        filetype=filetype,
+        system_prompt_text=system_prompt_text,
+    )
+
+    # ========================================================
+    # TRANSLATION MEMORY (exact profile match, before any API call)
+    # ========================================================
+
+    profile = _memory_profile(
+        model=model,
+        filetype=filetype,
+        system_prompt_text=system_prompt_text,
+        style_preset=style_preset,
+        text=text,
+        glossary_snapshot=glossary_snapshot,
+        from_lang=from_lang,
+        to_lang=to_lang,
+    )
+
+    if memory_db is not False:
 
         from app.translation.memory import lookup as _memory_lookup
 
@@ -661,7 +731,8 @@ def translate_chunk(
             from app.storage.database import db as database
 
         remembered = _memory_lookup(
-            database, text, from_lang, to_lang, int(user_id or 1)
+            database, text, from_lang, to_lang,
+            profile=profile, user_id=int(user_id or 1),
         )
 
         if remembered is not None:
@@ -678,24 +749,14 @@ def translate_chunk(
 
             return remembered
 
-    # ========================================================
-    # BUILD SYSTEM PROMPT
-    # ========================================================
-
-    system_message = _build_system_message(
-        from_lang=from_lang,
-        to_lang=to_lang,
-        filetype=filetype,
-        system_prompt_text=system_prompt_text,
-    )
-
     system_message = glossary_prompt(system_message, text, glossary_snapshot or {})
 
     # ── style preset ────────────────────────────────
 
-    from app.presets.manager import build_preset_system_message
+    from app.presets.manager import build_preset_system_message, resolve_style_key
+    style_key = resolve_style_key(style_preset)
     system_message = build_preset_system_message(
-        system_message, style_preset,
+        system_message, style_key,
     )
 
     # ========================================================
@@ -713,7 +774,7 @@ def translate_chunk(
         )
 
         from app.presets.manager import get_preset_params
-        preset_params = get_preset_params(style_preset)
+        preset_params = get_preset_params(style_key)
 
         # The context goes in its own message, ahead of the chunk, and only when
         # there is some. It costs no extra request -- it rides in the same one.
@@ -810,7 +871,7 @@ def translate_chunk(
 
             _remember_chunk(
                 memory_db, text, translated_text, from_lang, to_lang,
-                int(user_id or 1),
+                profile=profile, user_id=int(user_id or 1),
             )
 
             return translated_text
@@ -831,7 +892,8 @@ def translate_chunk(
 
             _remember_chunk(
                 memory_db, text, translated_text, from_lang, to_lang,
-                int(user_id or 1),
+                profile=dict(profile, model=fallback_model),
+                user_id=int(user_id or 1),
             )
 
             if fallback_record is not None:
@@ -1473,6 +1535,7 @@ def _process_fast_resume(
             filetype=filetype,
             system_prompt_text=system_prompt_text,
             glossary_snapshot=snapshot,
+            style_preset=style_preset,
             context_before=(chunk_contexts or {}).get(str(chunk_id)),
             fallback_model=fallback_model,
             fallback_record=fallback_record,

@@ -2316,7 +2316,10 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
             required = ["source_text", "translated_text", "source_language", "target_language"]
             if any(not str(body.get(k, "")).strip() for k in required): self._json({"error": "source_text, translated_text and languages are required."}, 400); return
-            db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, confidence=excluded.confidence, last_used_at=excluded.last_used_at", (self._user_id(),) + tuple(str(body.get(k, "")) for k in required) + (str(body.get("source", "manual")), float(body.get("confidence", 1)), now()))
+            from app.translation.memory import manual_fingerprint
+            values = tuple(str(body.get(k, "")) for k in required)
+            fingerprint = manual_fingerprint(self._user_id(), values[0], values[2], values[3])
+            db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at, translation_fingerprint, profile_version, profile_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{\"manual\":true}') ON CONFLICT(user_id, translation_fingerprint) DO UPDATE SET translated_text=excluded.translated_text, confidence=excluded.confidence, last_used_at=excluded.last_used_at", (self._user_id(),) + values + (str(body.get("source", "manual")), float(body.get("confidence", 1)), now(), fingerprint))
             self._json({"ok": True}, 201); return
         if path == "/api/memory/import":
             try: body = self._request_json(); entries = body.get("items", body.get("entries", []))
@@ -2324,7 +2327,10 @@ class Handler(BaseHTTPRequestHandler):
             count = 0
             for item in entries if isinstance(entries, list) else []:
                 try:
-                    db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, source_text, source_language, target_language) DO UPDATE SET translated_text=excluded.translated_text, last_used_at=excluded.last_used_at", (self._user_id(), item["source_text"], item["translated_text"], item.get("source_language", "EN"), item.get("target_language", "FA"), item.get("source", "import"), float(item.get("confidence", 1)), now())); count += 1
+                    from app.translation.memory import manual_fingerprint
+                    source_language, target_language = item.get("source_language", "EN"), item.get("target_language", "FA")
+                    fingerprint = manual_fingerprint(self._user_id(), item["source_text"], source_language, target_language)
+                    db.execute("INSERT INTO translation_memory(user_id, source_text, translated_text, source_language, target_language, source, confidence, last_used_at, translation_fingerprint, profile_version, profile_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{\"manual\":true}') ON CONFLICT(user_id, translation_fingerprint) DO UPDATE SET translated_text=excluded.translated_text, last_used_at=excluded.last_used_at", (self._user_id(), item["source_text"], item["translated_text"], source_language, target_language, item.get("source", "import"), float(item.get("confidence", 1)), now(), fingerprint)); count += 1
                 except (KeyError, TypeError, ValueError): continue
             self._json({"imported": count}); return
         if path == "/api/profiles":

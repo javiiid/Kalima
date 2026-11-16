@@ -120,3 +120,73 @@ def test_fresh_install_needs_no_legacy_data(tmp_path):
     account = database.fetch_one("SELECT * FROM accounts WHERE id=1")
     assert account is not None
     assert int(account["credit_balance"]) > 0
+
+
+def _v5_database(path: Path) -> None:
+    """Write a schema-v5 translation_memory (user-scoped, old uniqueness)."""
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '', password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE translation_memory (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 1, source_text TEXT NOT NULL,
+            translated_text TEXT NOT NULL, source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL, source TEXT DEFAULT 'manual',
+            confidence REAL DEFAULT 1, last_used_at TEXT NOT NULL,
+            UNIQUE(user_id, source_text, source_language, target_language));
+        INSERT INTO settings VALUES ('schema_version', '5', '2026-01-01T00:00:00+00:00');
+        INSERT INTO users VALUES (7, 'legacy@example.com', 'Legacy', 'x',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO translation_memory VALUES (1, 7, 'Hello', 'سلام', 'EN', 'FA', 'manual', 1, 'now');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+
+def _assert_profile_key(database) -> None:
+    row = database.fetch_one("SELECT * FROM translation_memory")
+    assert row["translation_fingerprint"].startswith("legacy:")
+    assert int(row["profile_version"]) == 0
+    sql = database.fetch_one(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='translation_memory'"
+    )["sql"]
+    assert "UNIQUE(user_id, translation_fingerprint)" in sql
+    # The old uniqueness is gone: two profiles may share the same source text.
+    database.execute(
+        "INSERT INTO translation_memory(user_id, source_text, translated_text,"
+        " source_language, target_language, last_used_at, translation_fingerprint)"
+        " VALUES (7, 'Hello', 'درود', 'EN', 'FA', 'now', 'v1:aaa')"
+    )
+    database.execute(
+        "INSERT INTO translation_memory(user_id, source_text, translated_text,"
+        " source_language, target_language, last_used_at, translation_fingerprint)"
+        " VALUES (7, 'Hello', 'سلام', 'EN', 'FA', 'now', 'v1:bbb')"
+    )
+    assert database.fetch_one(
+        "SELECT COUNT(*) AS n FROM translation_memory WHERE source_text='Hello'"
+    )["n"] == 3
+
+
+def test_v4_upgrade_adds_profile_fingerprint(tmp_path):
+    path = tmp_path / "legacy.db"
+    _legacy_database(path)
+    database = Database(path)
+    _assert_profile_key(database)
+
+
+def test_v5_upgrade_adds_profile_fingerprint(tmp_path):
+    path = tmp_path / "v5.db"
+    _v5_database(path)
+    database = Database(path)
+    _assert_profile_key(database)
+
+
+def test_reopening_a_v6_database_is_idempotent(tmp_path):
+    path = tmp_path / "fresh.db"
+    Database(path)
+    database = Database(path)
+    assert database.fetch_one("SELECT COUNT(*) AS n FROM translation_memory")["n"] == 0

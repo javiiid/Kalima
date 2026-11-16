@@ -16,6 +16,7 @@ import pytest
 from app import web
 from app.auth import service as auth
 from app.storage.database import Database
+from app.translation import memory
 
 
 @pytest.fixture
@@ -140,8 +141,9 @@ def test_glossary_and_memory_lists_are_scoped(live):
     )
     database.execute(
         "INSERT INTO translation_memory(user_id, source_text, translated_text, source_language,"
-        " target_language, last_used_at) VALUES (?, 'Hello', 'سلام', 'EN', 'FA', 'now')",
-        (owner,),
+        " target_language, last_used_at, translation_fingerprint)"
+        " VALUES (?, 'Hello', 'سلام', 'EN', 'FA', 'now', ?)",
+        (owner, memory.manual_fingerprint(owner, "Hello", "EN", "FA")),
     )
 
     status, payload = _call(server, "GET", "/api/glossaries", token=owner_token)

@@ -34,7 +34,7 @@ def resolve_db_path() -> Path:
 DB_PATH = resolve_db_path()
 # Bump when the schema or any _migrate_* changes: a bump takes exactly one
 # timestamped backup BEFORE migrating. See backup_database().
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BACKUP_KEEP = 5
 BACKUP_MAX_AGE_SECONDS = 86400
 # Credits a brand-new account starts with. The account portal shows a balance
@@ -82,7 +82,7 @@ class Database:
         CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, job_id TEXT, path TEXT NOT NULL, kind TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS glossaries (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, description TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, name));
         CREATE TABLE IF NOT EXISTS glossary_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, glossary_id INTEGER NOT NULL, source_term TEXT NOT NULL, target_term TEXT NOT NULL, notes TEXT DEFAULT '', UNIQUE(glossary_id, source_term), FOREIGN KEY(glossary_id) REFERENCES glossaries(id) ON DELETE CASCADE);
-        CREATE TABLE IF NOT EXISTS translation_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, source_text TEXT NOT NULL, translated_text TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL, source TEXT DEFAULT 'manual', confidence REAL DEFAULT 1, last_used_at TEXT NOT NULL, UNIQUE(user_id, source_text, source_language, target_language));
+        CREATE TABLE IF NOT EXISTS translation_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, source_text TEXT NOT NULL, translated_text TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL, source TEXT DEFAULT 'manual', confidence REAL DEFAULT 1, last_used_at TEXT NOT NULL, translation_fingerprint TEXT NOT NULL, profile_version INTEGER NOT NULL DEFAULT 0, profile_json TEXT NOT NULL DEFAULT '{}', UNIQUE(user_id, translation_fingerprint));
         CREATE TABLE IF NOT EXISTS translation_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, system_prompt TEXT NOT NULL, temperature REAL DEFAULT 0.2, preserve_html INTEGER DEFAULT 1, preserve_quotes INTEGER DEFAULT 1, glossary_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, name), FOREIGN KEY(glossary_id) REFERENCES glossaries(id) ON DELETE SET NULL);
         CREATE TABLE IF NOT EXISTS providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, base_url TEXT NOT NULL, api_key_ref TEXT DEFAULT '', default_model TEXT DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -125,6 +125,7 @@ class Database:
                 PRIMARY KEY(book_id, source_language, target_language, origin)
             )""")
             self._migrate_user_scope(connection)
+            self._migrate_translation_memory(connection)
             self._seed_defaults(connection)
             connection.execute(
                 "INSERT INTO settings(key, value_json, updated_at) VALUES ('schema_version', ?, ?)"
@@ -509,34 +510,6 @@ class Database:
             "(SELECT user_id FROM glossaries WHERE glossaries.id=glossary_terms.glossary_id),?)",
         )
 
-        memory_columns = Database._column_names(connection, "translation_memory")
-        memory_sql = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='translation_memory'"
-        ).fetchone()
-        if memory_columns and (
-            "user_id" not in memory_columns
-            or "UNIQUE(user_id, source_text" not in (memory_sql[0] if memory_sql else "")
-        ):
-            Database._rebuild_owned_table(
-                connection,
-                "translation_memory",
-                """CREATE TABLE {table} (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL DEFAULT 1,
-                    source_text TEXT NOT NULL,
-                    translated_text TEXT NOT NULL,
-                    source_language TEXT NOT NULL,
-                    target_language TEXT NOT NULL,
-                    source TEXT DEFAULT 'manual',
-                    confidence REAL DEFAULT 1,
-                    last_used_at TEXT NOT NULL,
-                    UNIQUE(user_id, source_text, source_language, target_language)
-                )""",
-                f"id,{owner},source_text,translated_text,source_language,"
-                "target_language,source,confidence,last_used_at",
-                owner,
-            )
-
         profile_columns = Database._column_names(connection, "translation_profiles")
         profile_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='translation_profiles'"
@@ -622,6 +595,77 @@ class Database:
                 connection.execute(statement)
             except Exception:  # noqa: BLE001 - optional index on a partially migrated table
                 pass
+
+    @staticmethod
+    def _migrate_translation_memory(connection):
+        """Rebuild ``translation_memory`` with a profile-aware fingerprint key.
+
+        Schema v6 moves uniqueness from
+        ``(user_id, source_text, source_language, target_language)`` to
+        ``(user_id, translation_fingerprint)`` so the same source text may
+        coexist under different translation profiles (style, prompt, glossary,
+        model). Rows written before the fingerprint existed get a
+        ``legacy:<id>`` fingerprint and ``profile_version=0``: they stay
+        visible in the memory UI but the engine never serves them, because
+        nobody can say which profile produced them.
+
+        Handles both upgrade paths in one idempotent pass: a v4 table (no
+        ``user_id``) and a v5 table (user-scoped, old global-ish uniqueness).
+        """
+        columns = Database._column_names(connection, "translation_memory")
+        if not columns:
+            return
+        sql_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='translation_memory'"
+        ).fetchone()
+        sql = (sql_row[0] if sql_row else "") or ""
+        owner = Database._first_user_id(connection)
+        if (
+            "translation_fingerprint" in columns
+            and "UNIQUE(user_id, translation_fingerprint)" in sql
+        ):
+            connection.execute(
+                "UPDATE translation_memory SET translation_fingerprint='legacy:'||id"
+                " WHERE translation_fingerprint IS NULL OR translation_fingerprint=''"
+            )
+            return
+        if "user_id" in columns:
+            select = (
+                "id,user_id,source_text,translated_text,source_language,"
+                "target_language,source,confidence,last_used_at,"
+                "'legacy:'||id,0,'{\"legacy\":true}'"
+            )
+        else:
+            select = (
+                f"id,{owner},source_text,translated_text,source_language,"
+                "target_language,source,confidence,last_used_at,"
+                "'legacy:'||id,0,'{\"legacy\":true}'"
+            )
+        Database._rebuild_owned_table(
+            connection,
+            "translation_memory",
+            """CREATE TABLE {table} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 1,
+                source_text TEXT NOT NULL,
+                translated_text TEXT NOT NULL,
+                source_language TEXT NOT NULL,
+                target_language TEXT NOT NULL,
+                source TEXT DEFAULT 'manual',
+                confidence REAL DEFAULT 1,
+                last_used_at TEXT NOT NULL,
+                translation_fingerprint TEXT NOT NULL,
+                profile_version INTEGER NOT NULL DEFAULT 0,
+                profile_json TEXT NOT NULL DEFAULT '{{}}',
+                UNIQUE(user_id, translation_fingerprint)
+            )""",
+            select,
+            owner,
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_translation_memory_user_time"
+            " ON translation_memory(user_id, last_used_at)"
+        )
 
     @staticmethod
     def _seed_defaults(connection):

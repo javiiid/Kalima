@@ -2,6 +2,11 @@
 # app/translation/prompts.py
 # ============================================================
 
+# Bump when a default prompt changes in a way that should invalidate
+# translation memory: the engine keys memory rows on the prompt text plus
+# this version, so old rows are never served under a new prompt.
+PROMPT_SCHEMA_VERSION = 1
+
 AUTHOR_VOICE_MARKER = "[AUTHOR_VOICE_PRESERVATION]"
 
 AUTHOR_VOICE_GUIDANCE = f"""

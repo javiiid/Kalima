@@ -59,7 +59,7 @@
 - Summary card at bottom: Storage, Cost, Provider status
 
 ### Anti-patterns
-- ❌ Do NOT allow simultaneous translation (RUN_LOCK in web.py)
+- ❌ Do NOT let one account start a second translation (the scheduler in `app/jobs/scheduler.py` enforces `max_jobs_per_user`; two *users* may run at once)
 - ❌ Do NOT use different theme key
 - ❌ Do NOT hardcode hex values
 - ❌ Do NOT forget RTL adjustments for sidebar

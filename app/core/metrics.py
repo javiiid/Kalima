@@ -87,8 +87,15 @@ class Metrics:
             }
 
 
-def prometheus_text(snapshot: dict[str, Any]) -> str:
-    """Render a snapshot in the Prometheus text exposition format."""
+def prometheus_text(
+    snapshot: dict[str, Any], job_stats: dict[str, Any] | None = None
+) -> str:
+    """Render a snapshot in the Prometheus text exposition format.
+
+    ``job_stats`` is the scheduler snapshot (slots, queued, running). It stays
+    optional so request counters can be rendered on their own, but when the
+    server passes it the scrape also describes queue pressure.
+    """
     lines = [
         "# HELP kalima_http_requests_total Total HTTP requests handled.",
         "# TYPE kalima_http_requests_total counter",
@@ -105,6 +112,18 @@ def prometheus_text(snapshot: dict[str, Any]) -> str:
         "# TYPE kalima_process_uptime_seconds gauge",
         f'kalima_process_uptime_seconds {snapshot.get("uptime_seconds", 0)}',
     ]
+    if job_stats is not None:
+        lines += [
+            "# HELP kalima_job_slots Total translation job slots.",
+            "# TYPE kalima_job_slots gauge",
+            f'kalima_job_slots {job_stats.get("slots", 0)}',
+            "# HELP kalima_jobs_running Jobs currently occupying a slot.",
+            "# TYPE kalima_jobs_running gauge",
+            f'kalima_jobs_running {job_stats.get("running", 0)}',
+            "# HELP kalima_jobs_queued Jobs waiting for a slot.",
+            "# TYPE kalima_jobs_queued gauge",
+            f'kalima_jobs_queued {job_stats.get("queued", 0)}',
+        ]
     return "\n".join(lines) + "\n"
 
 

@@ -14,7 +14,6 @@ import time
 import traceback
 import uuid
 import zipfile
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import policy
@@ -31,6 +30,7 @@ from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
     get_openai_config,
     get_chunking_config,
+    get_scheduler_config,
     get_translation_config,
     normalize_base_url,
     read_config_safe,
@@ -44,11 +44,14 @@ from app.core.models import (
     resolve_default_model,
 )
 from app.core.paths import ensure_dir
+from app.core.job_log import capture as capture_job_log, install as install_job_log
+from app.core.provider_gate import GatedClient, shared_gate, shared_rate_limiter
 from app.core.metrics import METRICS, prometheus_text
 from app.version import get_version
 from app.core.validation import ensure_disk_space, validate_book
 from app.core.web_i18n import inject_language_switcher
 from app.pipeline.pipeline import translate
+from app.jobs.scheduler import JobScheduler
 from app.output.convert import convert_file, normalize_convert_formats
 from app.translation.prompts import get_default_prompt, with_author_voice
 from app.storage.database import db
@@ -358,13 +361,61 @@ class Job:
     style: str = "literary"
     user_id: int = 1
     estimated_cost: float = 0.0
+    queued_at: str | None = None
 
 
 JOBS: dict[str, Job] = {}
 CONVERTS: dict[str, dict] = {}
 CONVERTS_LOCK = threading.RLock()
 JOBS_LOCK = threading.RLock()
-RUN_LOCK = threading.Lock()
+_SCHEDULER: JobScheduler | None = None
+_SCHEDULER_LOCK = threading.Lock()
+
+
+def _dispatch_job(job: Job, *, resume: bool = False) -> None:
+    """Run one job through the current ``_run_job``.
+
+    The scheduler keeps a reference to this dispatcher, not to ``_run_job``
+    itself, so a test (or a future restart hook) can replace the runner after
+    the scheduler already exists.
+    """
+    _run_job(job, resume=resume)
+
+
+def _scheduler() -> JobScheduler:
+    """Return the process-wide job scheduler.
+
+    The scheduler replaces the old process-wide run lock: it serialises jobs
+    through a fixed number of slots, keeps one user from owning all of them and
+    lets a queued job be cancelled before it spends anything. Slots and the
+    per-user cap are read from config.
+    """
+    global _SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER is None:
+            settings = get_scheduler_config()
+            _SCHEDULER = JobScheduler(
+                slots=settings["max_parallel_jobs"],
+                per_user_limit=settings["max_jobs_per_user"],
+                runner=_dispatch_job,
+            )
+        return _SCHEDULER
+
+
+def _user_has_active_job(user_id: int) -> bool:
+    """True when the user already holds as many jobs as the scheduler allows.
+
+    The check reads the scheduler, not a scan of every job ever created: a job
+    that already finished but lingers in ``JOBS`` must not block the next
+    upload, and a queued job must, because it is still going to spend money.
+    """
+    scheduler = _scheduler()
+    limit = scheduler.stats()["per_user_limit"]
+    active = [
+        job for job in scheduler.active_jobs(int(user_id))
+        if getattr(job, "status", None) in {"queued", "running"}
+    ]
+    return len(active) >= limit
 
 
 def _persist_job(job: Job) -> None:
@@ -384,6 +435,7 @@ def _persist_job(job: Job) -> None:
         "quality": job.quality,
         "style": job.style,
         "estimated_cost": job.estimated_cost,
+        "queued_at": job.queued_at,
     }
     target = JOB_META_DIR / f"{job.id}.json"
     temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
@@ -582,6 +634,7 @@ def restore_jobs() -> None:
             if not data.get("user_id"):
                 _backfill_job_owner(metadata_path, data, owner)
             job.estimated_cost = float(data.get("estimated_cost") or 0.0)
+            job.queued_at = data.get("queued_at")
             resumable = False
             was_active = job.status in {"queued", "running"}
             if was_active:
@@ -605,7 +658,7 @@ def restore_jobs() -> None:
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             continue
     for job in recover:
-        threading.Thread(target=_run_job, args=(job,), kwargs={"resume": True}, daemon=True).start()
+        _scheduler().submit(job, resume=True)
 
 
 def _safe_filename(name: str) -> str:
@@ -694,15 +747,17 @@ def _on_pipeline_started(job: Job, pipeline_job_id: str, paths: dict) -> None:
 
 
 def _run_job(job: Job, *, resume: bool = False) -> None:
-    """Run one job; the lock makes simultaneous translations impossible."""
-    with RUN_LOCK, redirect_stdout(job.log), redirect_stderr(job.log):
+    """Run one job on a scheduler slot, with its own log stream."""
+    with capture_job_log(job.log):
         try:
             job.status = "running"
             job.started_at = job.started_at or now()
             job.last_activity = job.updated_at = now()
             _persist_job(job)
             _job_event(job, "resumed" if resume else "started", "ترجمه از آخرین نقطهٔ سالم ادامه یافت." if resume else "ترجمه شروع شد.")
-            client = OpenAI(**get_openai_config())
+            # One gate and one limiter for every job: a per-job budget would
+            # double the provider traffic as soon as two books run together.
+            client = GatedClient(OpenAI(**get_openai_config()), shared_gate(), job.stop_event)
             output_name = f"{job.input_path.stem}_{job.options['to_lang'].lower()}_{job.options['model']}.{job.filetype}"
             job.output_path = user_output_dir(job.user_id) / f"{job.id}_{output_name}"
             prompt = job.options["prompt"] or get_default_prompt(job.options["from_lang"], job.options["to_lang"], job.filetype)
@@ -724,6 +779,8 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
                     style_preset=job.style,
                     fallback_model=job.options.get("fallback_model"),
                     user_id=int(job.user_id),
+                    log_sink=job.log,
+                    rate_limiter=shared_rate_limiter(),
                     on_job_started=lambda pipeline_id, paths: _on_pipeline_started(job, pipeline_id, paths))
             _update_progress(job)
             job.status = "cancelled" if job.cancel_requested else ("paused" if job.stop_event.is_set() else ("completed" if job.output_path.exists() else "failed"))
@@ -936,14 +993,22 @@ def _job_payload(job: Job) -> dict:
     inactive_seconds = 0
     try: inactive_seconds = max(0, (datetime.now(UTC) - datetime.fromisoformat(job.updated_at)).total_seconds())
     except ValueError: pass
+    queue_wait_seconds = 0.0
+    if job.queued_at:
+        try:
+            wait_until = datetime.fromisoformat(job.started_at) if job.started_at else datetime.now(UTC)
+            queue_wait_seconds = max(0.0, (wait_until - datetime.fromisoformat(job.queued_at)).total_seconds())
+        except ValueError:
+            pass
     health = "red" if job.status == "failed" or (job.status == "running" and inactive_seconds > 600) else "yellow" if job.status in {"queued", "paused", "stopping"} or (job.status == "running" and inactive_seconds > 120) else "green"
     result = {"id": job.id, "filename": job.filename, "filetype": job.filetype.upper(), "file_size": job.file_size,
         "source_language": job.source_language, "target_language": job.target_language, "model": job.model, "mode": job.mode,
         "status": job.status, "created_at": job.created_at, "started_at": job.started_at, "updated_at": job.updated_at, "last_activity": job.updated_at, "output_path": str(job.output_path) if job.output_path else None,
         "progress": {"completed": completed, "total": total, "percent": round(completed * 100 / total) if total else 0},
         "health": health, "eta_seconds": eta_seconds, "chunks_per_minute": round(rate * 60, 2),
+        "queued_at": job.queued_at, "queue_wait_seconds": round(queue_wait_seconds, 1),
         "log": job.log.getvalue(), "error": job.error,
-        "can_stop": job.status == "running",
+        "can_stop": job.status in {"queued", "running"},
         "can_cancel": job.status in {"queued", "running", "paused"},
         "can_resume": job.status in {"paused", "failed"} and bool(job.pipeline_job_id) and job.filetype == "epub"}
     result["rescue"] = f"/downloads/rescue/{job.id}"
@@ -2044,8 +2109,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._is_admin():
                 self._json({"error": "متریک‌های سرور فقط برای مدیر است."}, 403); return
             snapshot = METRICS.snapshot()
+            job_stats = _scheduler().stats()
             if parse_qs(parsed.query).get("format", [""])[0] == "prometheus":
-                body = prometheus_text(snapshot).encode("utf-8")
+                body = prometheus_text(snapshot, job_stats).encode("utf-8")
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -2053,7 +2119,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers(); self.wfile.write(body)
                 except _CLIENT_GONE: pass
                 return
-            self._json({"version": KALIMA_VERSION, **snapshot}); return
+            self._json({"version": KALIMA_VERSION, **snapshot, "jobs": job_stats}); return
         if parsed.path.startswith("/api/jobs/") and parsed.path.count("/") == 3:
             job=self._job(parsed.path.rsplit("/",1)[-1])
             if not job: self._json({"error":"کار موردنظر پیدا نشد."},404); return
@@ -2203,14 +2269,14 @@ class Handler(BaseHTTPRequestHandler):
                 options = dict(from_lang=snapshot['source_language'], to_lang=snapshot['target_language'], model=model.strip(), mode='fast', prompt='', outputs=body.get('outputs') or '', glossary_snapshot=json.dumps(snapshot, ensure_ascii=False))
                 uid = self._user_id()
                 with JOBS_LOCK:
-                    if any(item.status in {'queued', 'running'} and int(item.user_id) == uid for item in JOBS.values()):
+                    if _user_has_active_job(uid):
                         self._json({'error': 'یک ترجمه در حال اجراست.'}, 409); return
                     job = Job(uuid.uuid4().hex[:12], source['display_name'] or Path(source['path']).name, Path(source['path']), source['extension'], source['size_bytes'], options, options['from_lang'], options['to_lang'], options['model'], 'fast', user_id=uid)
                     _charge_job_start(uid, job.id)
                     _persist_job(job)
                     db.execute('INSERT INTO files(user_id,job_id,book_id,path,kind,display_name,extension,size_bytes,created_at) VALUES (?,?,?,?,?,?,?,?,?)', (uid, job.id, book_id, source['path'], 'original', job.filename, job.filetype, job.file_size, now()))
                     JOBS[job.id] = job
-                threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+                _scheduler().submit(job)
                 self._json({'id': job.id}, 201)
             except account_billing.InsufficientCredit as exc: self._json({'error': str(exc)}, 402)
             except LookupError as exc: self._json({'error': str(exc)}, 404)
@@ -2449,16 +2515,24 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError) as exc: self._json({"error": str(exc)}, 400); return
         if path.startswith("/api/jobs/") and path.endswith("/stop"):
             job=self._job(path.split("/")[-2])
-            if not job or job.status!="running": self._json({"error":"این کار قابل توقف نیست."},400); return
+            if not job or job.status not in {"queued", "running"}: self._json({"error":"این کار قابل توقف نیست."},400); return
+            if job.status=="queued":
+                # Nothing has been spent yet, so a stop on a queued job is a
+                # cancel: drop it from the scheduler instead of signalling a
+                # worker loop that never started.
+                _scheduler().cancel(job.id)
+                job.cancel_requested=True; job.stop_event.set(); job.status="cancelled"; job.last_activity=job.updated_at=now(); _persist_job(job); _job_event(job, "cancelled", "کار پیش از شروع از صف حذف شد."); self._json({"ok":True}); return
             job.stop_event.set(); job.last_activity=job.updated_at=now(); _persist_job(job); _job_event(job, "stop_requested", "درخواست توقف امن ثبت شد."); self._json({"ok":True}); return
         if path.startswith("/api/jobs/") and path.endswith("/cancel"):
             job=self._job(path.split("/")[-2])
             if not job or job.status not in {"queued", "running", "paused"}: self._json({"error":"این کار قابل لغو نیست."},400); return
-            job.cancel_requested=True; job.stop_event.set(); job.status="cancelled" if job.status=="queued" else job.status; job.last_activity=job.updated_at=now(); _persist_job(job); self._json({"ok":True}); return
+            job.cancel_requested=True; job.stop_event.set()
+            if job.status=="queued": _scheduler().cancel(job.id); job.status="cancelled"
+            job.last_activity=job.updated_at=now(); _persist_job(job); self._json({"ok":True}); return
         if path.startswith("/api/jobs/") and path.endswith("/resume"):
             job=self._job(path.split("/")[-2])
             if not job or job.filetype!="epub" or not job.pipeline_job_id or job.status not in {"paused","failed"}: self._json({"error":"این کار قابل ادامه نیست."},400); return
-            job.stop_event=threading.Event(); job.cancel_requested=False; job.status="queued"; job.error=None; job.last_activity=job.updated_at=now(); _persist_job(job); _job_event(job, "resume_queued", "ادامه از آخرین جای سالم وارد صف شد."); threading.Thread(target=_run_job,args=(job,),kwargs={"resume":True},daemon=True).start(); self._json({"ok":True},202); return
+            job.stop_event=threading.Event(); job.cancel_requested=False; job.status="queued"; job.error=None; job.last_activity=job.updated_at=now(); _persist_job(job); _job_event(job, "resume_queued", "ادامه از آخرین جای سالم وارد صف شد."); _scheduler().submit(job, resume=True); self._json({"ok":True},202); return
         if path.startswith('/api/library/') and path.endswith('/glossary/propose'):
             try: body = self._request_json()
             except (ValueError, json.JSONDecodeError) as exc: self._json({"error": str(exc)}, 400); return
@@ -2564,7 +2638,7 @@ class Handler(BaseHTTPRequestHandler):
                     job.status = "queued"; job.error = None; job.last_activity = job.updated_at = now()
                     _persist_job(job)
                     _job_event(job, "resume_queued", "ادامه از آخرین جای سالم وارد صف شد.")
-                    threading.Thread(target=_run_job, args=(job,), kwargs={"resume": True}, daemon=True).start()
+                    _scheduler().submit(job, resume=True)
                     resumed += 1
                 self._json({"ok": True, "action": "resume", "resumed": resumed, "skipped": skipped, "requested": len(ids)}); return
             if action == "download":
@@ -2665,7 +2739,7 @@ class Handler(BaseHTTPRequestHandler):
         options["style_preset"] = str(fields.get("style_preset", "literary") or "literary")
         try:
             with JOBS_LOCK:
-                if any(item.status in {"queued", "running"} and int(item.user_id) == uid for item in JOBS.values()):
+                if _user_has_active_job(uid):
                     self._json({"error": "یک ترجمه در حال اجراست."}, 409); return
                 if job_id in JOBS:
                     self._json({"error": "این فایل از قبل در حال ترجمه است."}, 409); return
@@ -2688,7 +2762,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     # The translation Job remains authoritative if the library index is unavailable.
                     pass
-            threading.Thread(target=_run_job,args=(job,),daemon=True).start()
+            _scheduler().submit(job)
             self._json({"id": job_id, "book_id": book_id,
                         "from_lang": options["from_lang"], "to_lang": options["to_lang"]},201)
         except account_billing.InsufficientCredit as exc:
@@ -2863,6 +2937,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    install_job_log()
     restore_jobs()
     host = (os.environ.get("KALIMA_HOST") or "127.0.0.1").strip()
     try:

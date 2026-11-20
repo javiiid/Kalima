@@ -59,6 +59,15 @@ dispatch with a clear message. Full pytest green.
    pages of a book (`pdf.ocr_pages_threshold`, `--pages`), but OCR is still
    CPU-bound and runs inside the job thread. Hosted needs a separate worker
    queue so one scanned book cannot starve every other translation.
+6. **Job capacity.** The web server no longer serialises every book behind a
+   process-wide lock: `app/jobs/scheduler.py` runs a fair, capacity-limited
+   queue (`translation.max_parallel_jobs`, hard cap 4; one slot per user by
+   default), and the shared gate in `app/core/provider_gate.py` keeps total
+   provider traffic at `max_concurrency` no matter how many jobs run. At
+   launch those slots become the per-node capacity knob; moving the queue
+   itself to the worker tier is the same job as item 5. `JobScheduler` is
+   still in-process (threads, not a broker), which is the deliberate
+   single-node shape — a second node means a real queue, not a bigger number.
 
 Acceptance: fresh VPS → running product in <30 min from the docs; kill -9 the
 container mid-book → resume works; restore-from-backup drill passes.

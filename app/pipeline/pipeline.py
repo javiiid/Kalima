@@ -210,6 +210,8 @@ def _translate_epub(
     style_preset=None,
     fallback_model=None,
     user_id=1,
+    log_sink=None,
+    rate_limiter=None,
 ):
     """
     Execute the complete EPUB translation pipeline.
@@ -520,6 +522,8 @@ def _translate_epub(
                 chunk_contexts=chunk_contexts,
                 fallback_model=fallback_model,
                 user_id=int(user_id or 1),
+                log_sink=log_sink,
+                rate_limiter=rate_limiter,
             )
         )
 
@@ -852,6 +856,8 @@ def _translate_pdf(
     style_preset=None,
     fallback_model=None,
     user_id=1,
+    log_sink=None,
+    rate_limiter=None,
 ):
     """
     Execute the PDF processing pipeline.
@@ -1181,6 +1187,8 @@ def _translate_pdf(
                 style_preset=style_preset,
                 fallback_model=fallback_model,
                 user_id=int(user_id or 1),
+                log_sink=log_sink,
+                rate_limiter=rate_limiter,
             )
         )
 
@@ -1392,6 +1400,8 @@ def translate(
     style_preset=None,
     fallback_model=None,
     user_id=1,
+    log_sink=None,
+    rate_limiter=None,
 ):
     """
     Main translation dispatcher.
@@ -1434,6 +1444,17 @@ def translate(
 
     user_id:
         Owner of the job; scopes the translation memory (Phase 1).
+
+    log_sink:
+        Optional stream that receives output from translation worker threads.
+        The web server passes the job's log buffer so concurrent jobs do not
+        cross-wire their logs. ``None`` keeps the CLI behavior unchanged.
+
+    rate_limiter:
+        Optional shared limiter. The web server passes one instance for every
+        job so two books cannot each spend the full requests-per-minute
+        allowance. ``None`` builds a per-run limiter, which is what the CLI
+        still wants.
     """
 
     # ========================================================
@@ -1598,6 +1619,8 @@ def translate(
             style_preset=style_preset,
             fallback_model=fallback_model,
             user_id=user_id,
+            log_sink=log_sink,
+            rate_limiter=rate_limiter,
         )
 
     # ========================================================
@@ -1622,6 +1645,8 @@ def translate(
             style_preset=style_preset,
             fallback_model=fallback_model,
             user_id=user_id,
+            log_sink=log_sink,
+            rate_limiter=rate_limiter,
         )
 
     # ========================================================

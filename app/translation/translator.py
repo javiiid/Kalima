@@ -40,6 +40,7 @@ from app.jobs.state import save_translations
 from app.jobs.state import deduplicate_chunks
 
 from app.core.paths import ensure_dir
+from app.core.job_log import bind as bind_job_log
 from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
     get_translation_config,
@@ -1345,6 +1346,7 @@ def _flush_glossary(
     model: str,
     stop_event: Any,
     workers: int,
+    log_sink=None,
 ) -> None:
     """Learn glossary terms for finished chunks, off the translation path.
 
@@ -1374,7 +1376,11 @@ def _flush_glossary(
         except BaseException as error:  # noqa: BLE001 - glossary must not fail the job
             print(f"Glossary learning failed for chunk {chunk_id}: {error}")
 
-    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="glossary") as pool:
+    pool_args = {"max_workers": count, "thread_name_prefix": "glossary"}
+    if log_sink is not None:
+        pool_args["initializer"] = bind_job_log
+        pool_args["initargs"] = (log_sink,)
+    with ThreadPoolExecutor(**pool_args) as pool:
         futures = [pool.submit(learn, item) for item in pending_terms]
         for future in futures:
             try:
@@ -1485,6 +1491,8 @@ def _process_fast_resume(
     fallback_model: str | None = None,
     fallback_record: list | None = None,
     user_id: int = 1,
+    log_sink=None,
+    rate_limiter=None,
 ) -> tuple[dict[str, Any], None, None]:
     """Translate chunks concurrently while persisting each completed result."""
     max_workers = _translation_concurrency()
@@ -1554,7 +1562,7 @@ def _process_fast_resume(
     # Chunk ids served from translation memory (zero API calls); the commit
     # path treats them exactly like translated chunks, so resume stays safe.
     memory_hits: list[str] = []
-    limiter = _build_rate_limiter(max_workers)
+    limiter = rate_limiter if rate_limiter is not None else _build_rate_limiter(max_workers)
     if limiter is not None:
         print(
             f"Pacing provider requests at up to {limiter.current_rpm}/min [rate_limit]"
@@ -1563,7 +1571,11 @@ def _process_fast_resume(
     failure = None
     stopping = False
 
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="translate") as executor:
+    executor_args = {"max_workers": max_workers, "thread_name_prefix": "translate"}
+    if log_sink is not None:
+        executor_args["initializer"] = bind_job_log
+        executor_args["initargs"] = (log_sink,)
+    with ThreadPoolExecutor(**executor_args) as executor:
         def fill_queue() -> None:
             while len(pending) < max_workers and not failure and not stopping:
                 try:
@@ -1630,6 +1642,7 @@ def _process_fast_resume(
 
     _flush_glossary(
         client, paths, deferred_glossary, model, stop_event, max_workers,
+        log_sink=log_sink,
     )
 
     if failure is not None:
@@ -1761,6 +1774,8 @@ def process_translations(
     chunk_contexts: dict[str, str] | None = None,
     fallback_model: str | None = None,
     user_id: int = 1,
+    log_sink=None,
+    rate_limiter=None,
 ) -> tuple[dict[str, Any], Any, Any]:
     """
     Main translation workflow dispatcher.
@@ -1898,6 +1913,8 @@ def process_translations(
             fallback_model=fallback_model,
             fallback_record=fallback_record,
             user_id=int(user_id or 1),
+            log_sink=log_sink,
+            rate_limiter=rate_limiter,
         )
 
         if fallback_model:

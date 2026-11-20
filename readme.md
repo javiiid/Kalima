@@ -498,6 +498,8 @@ every blob forever. Download the newest backup any time from `/account`.
 | `translation.default_to_lang` | `EN` | Target language |
 | `translation.default_mode` | `fast` | Translation mode |
 | `translation.max_concurrency` | `12` | Hard cap in `app/core/config.py` |
+| `translation.max_parallel_jobs` | `2` | Web jobs translating at once (hard cap 4) |
+| `translation.max_jobs_per_user` | `1` | Job slots one account may hold |
 | `translation.requests_per_minute` | `120` | Request cap; `null` = unlimited |
 | `translation.glossary_mode` | `off` | Glossary behavior |
 | `translation.temperature` | `0.2` | Output creativity |
@@ -529,6 +531,8 @@ translation:
   default_mode: "fast"
 
   max_concurrency: 12
+  max_parallel_jobs: 2     # books translating at once (1..4)
+  max_jobs_per_user: 1     # how many of those slots one account may hold
   requests_per_minute: 120
   glossary_mode: "off"
 

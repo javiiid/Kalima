@@ -40,6 +40,68 @@ MAX_TRANSLATION_CONCURRENCY = 12
 
 
 # ============================================================
+# Job scheduling
+# ============================================================
+# How many web translation jobs may run at once, and how many of those slots a
+# single account may hold. This is the replacement for the process-wide
+# RUN_LOCK that used to serialise every book: the scheduler is fair (round
+# robin across users) but capacity is still a deliberate budget, because two
+# books mean two pipelines competing for the same CPU and the same provider.
+#
+# Provider traffic is capped separately by the shared gate
+# (``max_concurrency``), so raising this does not multiply open requests; the
+# jobs share one ceiling. Raise it when the machine and the provider can
+# absorb a second book's worth of chunk work.
+MAX_PARALLEL_JOBS_DEFAULT = 2
+MAX_PARALLEL_JOBS_CEILING = 4
+MAX_JOBS_PER_USER_DEFAULT = 1
+
+
+def get_scheduler_config():
+    """
+    Return the job-scheduler settings, with defaults filled in.
+
+    Keys, both under ``translation`` in config.yaml:
+
+        max_parallel_jobs   int   jobs that may run at the same time (1..4)
+        max_jobs_per_user   int   how many slots one account may hold
+
+    ``KALIMA_JOB_SLOTS`` and ``KALIMA_JOBS_PER_USER`` override config.yaml,
+    which is how the test suite and a container set capacity without editing
+    the file. ``max_jobs_per_user`` is clamped to the slot count: a rule that
+    one user may hold more slots than exist is not a rule.
+    """
+
+    try:
+        settings = get_translation_config()
+    except (FileNotFoundError, ValueError):
+        settings = {}
+
+    def _as_int(value, fallback, minimum=1, maximum=None):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        parsed = max(minimum, parsed)
+        return min(parsed, maximum) if maximum is not None else parsed
+
+    slots = _as_int(
+        os.environ.get("KALIMA_JOB_SLOTS") or settings.get("max_parallel_jobs"),
+        MAX_PARALLEL_JOBS_DEFAULT,
+        maximum=MAX_PARALLEL_JOBS_CEILING,
+    )
+    per_user = _as_int(
+        os.environ.get("KALIMA_JOBS_PER_USER") or settings.get("max_jobs_per_user"),
+        MAX_JOBS_PER_USER_DEFAULT,
+    )
+
+    return {
+        "max_parallel_jobs": slots,
+        "max_jobs_per_user": min(per_user, slots),
+    }
+
+
+# ============================================================
 # Load Configuration
 # ============================================================
 
@@ -108,7 +170,12 @@ def read_config():
             "  temperature: 0.2\n"
             "  max_retries: 5\n"
             "  retry_delay: 5\n"
-            "  max_retry_delay: 60"
+            "  max_retry_delay: 60\n"
+            "\n"
+            "  # optional: jobs allowed to translate at once (hard cap 4), and\n"
+            "  # how many of those slots one account may hold\n"
+            "  max_parallel_jobs: 2\n"
+            "  max_jobs_per_user: 1"
         )
 
         raise

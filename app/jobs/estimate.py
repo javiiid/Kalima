@@ -37,8 +37,9 @@ Pricing
 -------
 The obvious thing to do here is invent numbers, and the numbers in the original
 spec (``gpt-4o`` at $0.005/1K) are invented -- the project's models are
-``gpt-5.6-luna``, ``gpt-5.6-terra`` and ``gemini-3.1-flash-lite``, and no public
-price list covers them. Rather than print a fabricated figure, :data:`PRICING`
+``gpt-5.6-luna``, ``gpt-5.6-terra``, ``gemini-3.1-flash-lite`` and
+``deepseek-v4.1-flash``, and no public price list covers them. Rather than print
+a fabricated figure, :data:`PRICING`
 holds a price per million tokens, and a model with no entry is reported with
 ``cost_known = False``. The UI then says the price is unknown instead of
 asserting a number. Anyone who knows the real prices edits one dict.
@@ -87,6 +88,11 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-5.6-luna": (0.15, 0.60),           # Equivalent to gpt-4o-mini
     "gpt-5.6-terra": (2.50, 10.00),         # Equivalent to gpt-4o
     "gemini-3.1-flash-lite": (0.075, 0.30), # Equivalent to gemini-1.5-flash
+    # DeepSeek V4.1 Flash (deepseek-flash / DeepSeek-V4.1-Flash-1017). Official
+    # list price, USD per million tokens: cache-miss input $0.15 off-peak /
+    # $0.30 peak, output $0.60 off-peak / $1.20 peak. Priced at the peak rate
+    # so the estimate is biased high; off-peak is half of this.
+    "deepseek-v4.1-flash": (0.30, 1.20),
 }
 
 

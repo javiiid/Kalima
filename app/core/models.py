@@ -41,6 +41,10 @@ SUPPORTED_MODELS = {
         "provider": "openai-compatible",
         "description": "Fast, lower-cost translation model",
     },
+    "deepseek-v4.1-flash": {
+        "provider": "openai-compatible",
+        "description": "Fast, low-cost DeepSeek translation model",
+    },
 }
 
 

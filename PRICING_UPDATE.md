@@ -1,7 +1,7 @@
 # Pricing Update - September 2026
 
 ## Summary
-Updated the `PRICING` dictionary in `app/jobs/estimate.py` with **22 models** and their real-world pricing.
+Updated the `PRICING` dictionary in `app/jobs/estimate.py` with **23 models** and their real-world pricing.
 
 ## Changes Made
 
@@ -50,12 +50,13 @@ PRICING: dict[str, tuple[float, float]] = {
 | gemini-2.0-flash | $0.10 | $0.40 |
 | gemini-pro | $0.50 | $1.50 |
 
-### Custom Project Models (3 models)
+### Custom Project Models (4 models)
 | Model | Input ($/M) | Output ($/M) | Notes |
 |-------|-------------|--------------|-------|
 | gpt-5.6-luna | $0.15 | $0.60 | Equivalent to gpt-4o-mini |
 | gpt-5.6-terra | $2.50 | $10.00 | Equivalent to gpt-4o |
 | gemini-3.1-flash-lite | $0.075 | $0.30 | Equivalent to gemini-1.5-flash |
+| deepseek-v4.1-flash | $0.30 | $1.20 | DeepSeek V4.1 Flash; peak cache-miss input / output (off-peak is half) |
 
 ## Calculation Accuracy
 
@@ -94,7 +95,7 @@ range = total ± 15%
 
 ## Benefits
 
-1. **Accurate pricing** for 22 popular models
+1. **Accurate pricing** for 23 popular models
 2. **0.0000% error** in calculations (verified)
 3. **User can compare** costs across providers
 4. **Honest estimates** - unknown models show "unknown" instead of $0.00
@@ -122,3 +123,20 @@ If you need to add more models or update pricing:
 ---
 **Updated**: 2026-09-29  
 **Tested**: ✅ Verified with real-world data
+
+
+## Update: deepseek-v4.1-flash (2026-11-26)
+
+Added `deepseek-v4.1-flash` (provider maps it to `deepseek-ai/DeepSeek-V4.1-Flash`).
+Official DeepSeek list price, USD per 1M tokens:
+
+| | Off-peak | Peak |
+|---|---|---|
+| Input (cache hit) | $0.003 | $0.006 |
+| Input (cache miss) | $0.15 | $0.30 |
+| Output | $0.60 | $1.20 |
+
+`PRICING` stores the **peak cache-miss input / output** rate `(0.30, 1.20)` because
+the estimator is deliberately biased high and every translation chunk is fresh text
+(a cache miss). Off-peak is half of this. Source:
+https://api-docs.deepseek.com/quick_start/pricing/

@@ -110,7 +110,7 @@ block = re.search(r'<select name="model"[^>]*>.*?</select>', served, re.S).group
 offered = re.findall(r'<option value="([^"]+)"([^>]*)>', block)
 for value, attrs in offered:
     print(f"  {value}{'  <-- selected' if 'selected' in attrs else ''}")
-check("all three models are offered", {v for v, _ in offered} == set(models.SUPPORTED_MODELS))
+check("every supported model is offered", {v for v, _ in offered} == set(models.SUPPORTED_MODELS))
 check("no model is preselected in the template itself",
       not Path(r"D:\J_BookTranslate_V\app\web.py").read_text(encoding="utf-8")
       .count('value="gpt-5.6-terra" selected'))
@@ -120,7 +120,7 @@ print("=== 3. an explicit choice reaches the pipeline ===")
 print("-" * 70)
 from app.translation.translator import translate_chunk  # noqa: E402
 
-for choice in ["gpt-5.6-terra", "gpt-5.6-luna", "gemini-3.1-flash-lite"]:
+for choice in ["gpt-5.6-terra", "gpt-5.6-luna", "gemini-3.1-flash-lite", "deepseek-v4.1-flash"]:
     seen_models.clear()
     translate_chunk(fake_client, "Hello.", "سلام.", "EN", "FA", model=choice)
     check(f"an explicit {choice} is sent", seen_models == [choice], str(seen_models))

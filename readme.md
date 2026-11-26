@@ -704,6 +704,7 @@ engine both read from it.
 | `gpt-5.6-luna` | Main translation model *(default)* |
 | `gpt-5.6-terra` | Higher quality |
 | `gemini-3.1-flash-lite` | Faster and cheaper |
+| `deepseek-v4.1-flash` | Fast and low-cost DeepSeek model |
 
 To switch, change one line in `config/config.yaml`. Form and pipeline move together.
 

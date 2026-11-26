@@ -141,9 +141,12 @@ def test_the_translation_form_offers_every_supported_model():
     )
 
 
-def test_all_three_models_are_known():
+def test_every_offered_model_is_known():
     assert set(SUPPORTED_MODELS) == {
-        "gpt-5.6-terra", "gpt-5.6-luna", "gemini-3.1-flash-lite",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gemini-3.1-flash-lite",
+        "deepseek-v4.1-flash",
     }
 
 

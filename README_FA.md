@@ -526,6 +526,7 @@ python -m app.main --input PATH [options]
 | `gpt-5.6-luna` | مدل اصلی ترجمه *(پیش‌فرض)* |
 | `gpt-5.6-terra` | کیفیت بالاتر |
 | `gemini-3.1-flash-lite` | سریع‌تر و ارزان‌تر |
+| `deepseek-v4.1-flash` | مدل سریع و کم‌هزینهٔ DeepSeek |
 
 برای تغییر، فقط یک خط در `config/config.yaml` را عوض کنید. هر دو فرم و
 pipeline با هم جلو می‌روند.

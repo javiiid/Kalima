@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import read_config_safe
+from app.core.models import model_request
 from app.output.markers import BOUNDARY_RE, NOTE_RE, strip_markers
 
 # ── dimension names and weights ────────────────────────────────
@@ -668,7 +669,7 @@ def score_chunk(
                     mode=mode,
                 )
                 response = llm_client.chat.completions.create(
-                    model=model,
+                    **model_request(model),
                     messages=[
                         {
                             "role": "system",

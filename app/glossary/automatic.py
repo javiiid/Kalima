@@ -7,6 +7,7 @@ from html import unescape
 from pathlib import Path
 
 from app.glossary.service import load_snapshot, matching_terms
+from app.core.models import model_request
 from app.jobs.state import _atomic_json, state_lock
 
 MAX_TERMS = 2000
@@ -68,7 +69,7 @@ def learn_chunk(client, paths, chunk_id, source, translated, model, stop_event=N
     }
     try:
         response = client.chat.completions.create(
-            model=model,
+            **model_request(model),
             messages=[
                 {'role': 'system', 'content': (
                     'Extract a concise book glossary from the paired source and translation. '

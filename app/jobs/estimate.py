@@ -93,6 +93,9 @@ PRICING: dict[str, tuple[float, float]] = {
     # $0.30 peak, output $0.60 off-peak / $1.20 peak. Priced at the peak rate
     # so the estimate is biased high; off-peak is half of this.
     "deepseek-v4.1-flash": (0.30, 1.20),
+    # Same upstream model with reasoning disabled: identical price per token,
+    # but far fewer output tokens, so the real bill is lower.
+    "deepseek-v4.1-flash-low": (0.30, 1.20),
 }
 
 

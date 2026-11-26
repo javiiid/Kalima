@@ -17,7 +17,9 @@ from app.core.models import (
     DEFAULT_MODEL,
     SUPPORTED_MODELS,
     is_supported_model,
+    model_request,
     resolve_default_model,
+    upstream_model,
 )
 
 APP = Path(r"D:\J_BookTranslate_V\app")
@@ -147,7 +149,26 @@ def test_every_offered_model_is_known():
         "gpt-5.6-luna",
         "gemini-3.1-flash-lite",
         "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash-low",
     }
+
+
+def test_a_variant_model_sends_its_upstream_id():
+    """The provider has no ``-low`` model id, so the request must not send one.
+
+    ``deepseek-v4.1-flash-low`` is a local variant that selects the low
+    reasoning setting on the same upstream model. Sending the variant name to
+    the provider returns 404 model_not_found, which is exactly the failure this
+    mapping prevents.
+    """
+    assert upstream_model("deepseek-v4.1-flash-low") == "deepseek-v4.1-flash"
+    assert model_request("deepseek-v4.1-flash-low") == {
+        "model": "deepseek-v4.1-flash",
+        "reasoning_effort": "none",
+    }
+    # A plain model passes through untouched, with no extra parameters.
+    assert model_request("gpt-5.6-luna") == {"model": "gpt-5.6-luna"}
+    assert upstream_model("gpt-5.6-luna") == "gpt-5.6-luna"
 
 
 # --------------------------------------------------------------------------

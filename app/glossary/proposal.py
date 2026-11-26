@@ -28,6 +28,7 @@ import unicodedata
 from html import unescape
 
 from app.glossary.service import matching_terms
+from app.core.models import model_request
 
 # Chunks sampled for a proposal. Twelve across a book is roughly 6k tokens of
 # source, which is one cheap call and wide enough coverage to be useful.
@@ -149,7 +150,7 @@ def _parse(content, corpus: str) -> list[dict]:
 
 def _run(client, model, corpus, source_language, target_language, instructions: str):
     response = client.chat.completions.create(
-        model=model,
+        **model_request(model),
         messages=[
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": json.dumps({

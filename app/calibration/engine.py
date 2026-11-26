@@ -7,6 +7,7 @@ import re
 from decimal import Decimal, ROUND_CEILING
 
 from app.calibration.documents import digest
+from app.core.models import model_request
 from app.pipeline.semantic_chunker import _token_stream, estimate_tokens
 from app.glossary.service import matching_terms
 
@@ -109,7 +110,7 @@ def compile_request(unit, profile, model):
     terms = [{k: t[k] for k in ("source_term", "target_term", "locked", "notes") if k in t} for t in terms]
     messages = [{"role": "system", "content": SYSTEM.format(source_language=profile["from_lang"], target_language=profile["to_lang"], tone=TONES[profile["tone"]]["rules"])},
                 {"role": "user", "content": json.dumps({"context": unit["context"], "slots": slots, "glossary": terms, "approved_style_guidance": profile.get("instructions", "")}, ensure_ascii=False)}]
-    request = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 4096}
+    request = {**model_request(model), "messages": messages, "temperature": 0.2, "max_tokens": 4096}
     key = digest({"version": VERSION, "provider": profile["provider"], "source": unit["source"], "request": request})
     return {"key": key, "request": request, "parts": parts, "slots": slots, "terms": terms}
 

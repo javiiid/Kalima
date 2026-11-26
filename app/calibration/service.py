@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from app.calibration.documents import digest, prepare
@@ -15,12 +16,27 @@ from app.calibration.engine import (TONES, VERSION, GLOSSARY_SYSTEM, ModelOutput
     compile_request, cost_micros, parse_json, token_estimate, token_reservation,
     validate_result)
 from app.calibration.store import Store, Conflict, BudgetExceeded, now
-from app.core.config import get_openai_config, read_config_safe
-from app.core.models import is_supported_model, resolve_default_model
+from app.core.config import get_openai_config, get_translation_config, read_config_safe
+from app.core.models import is_supported_model, model_request, resolve_default_model
 from app.glossary.proposal import key as term_key
 from app.glossary.service import language, matching_terms
 from app.jobs.estimate import PRICING
 from app.output.formats import normalize_outputs
+
+
+def sample_workers(unit_count):
+    """How many sample units to translate at once.
+
+    The preview is the first thing a user waits on, so it runs the same way a
+    full book does: several units in flight, bounded by the configured
+    translation concurrency. A missing or unreadable config falls back to the
+    conservative default instead of failing the operation.
+    """
+    try:
+        configured = int(get_translation_config().get("max_concurrency") or 3)
+    except (OSError, TypeError, ValueError):
+        configured = 3
+    return max(1, min(12, configured, max(1, unit_count)))
 
 
 def integer(value, minimum, maximum, name):
@@ -422,14 +438,59 @@ class CalibrationService:
                     units = [u for u in session["document"]["units"] if u["id"] in selected]
                     model = session["profile"]["final_model" if body.get("final", True) else "model"]
                     operation["total"] = len(units)
-                    for unit in units:
-                        if self.store.operation(operation["id"]).get("cancel_requested"):
-                            operation["status"] = "cancelled"
-                            break
-                        result, key = self.translate_unit(session, unit, model)
-                        self.store.change(session["id"], lambda s, k=key, r=result: s["results"].update({k: r}))
-                        operation["completed"] += 1
-                        self.store.update_operation(operation)
+                    self.store.update_operation(operation)
+                    # Translate the sample units concurrently. They used to run
+                    # one after another, so a three-sample preview cost three
+                    # full model round-trips in series -- a minute or more on a
+                    # reasoning model, which reads as "the app is stuck". The
+                    # full book already runs this way (runner.run_calibrated_job);
+                    # the preview was the only serial path left.
+                    workers = sample_workers(len(units))
+                    failure = None
+                    cancelled = False
+                    remaining = iter(units)
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        pending = {}
+
+                        def submit_next():
+                            while len(pending) < workers and failure is None and not cancelled:
+                                try:
+                                    unit = next(remaining)
+                                except StopIteration:
+                                    return
+                                pending[executor.submit(self.translate_unit, session, unit, model)] = unit
+
+                        submit_next()
+                        while pending:
+                            if self.store.operation(operation["id"]).get("cancel_requested"):
+                                cancelled = True
+                            if cancelled:
+                                for future in pending:
+                                    future.cancel()
+                                pending.clear()
+                                break
+                            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                            for future in done:
+                                unit = pending.pop(future)
+                                try:
+                                    result, key = future.result()
+                                except Exception as exc:
+                                    failure = failure or exc
+                                    continue
+                                self.store.change(session["id"], lambda s, k=key, r=result: s["results"].update({k: r}))
+                                operation["completed"] += 1
+                                self.store.update_operation(operation)
+                            if failure is not None:
+                                cancelled = True
+                                for future in pending:
+                                    future.cancel()
+                                pending.clear()
+                                break
+                            submit_next()
+                    if failure is not None:
+                        raise failure
+                    if cancelled:
+                        operation["status"] = "cancelled"
             if operation["status"] != "cancelled":
                 operation["status"] = "succeeded"
         except Exception as exc:
@@ -442,7 +503,7 @@ class CalibrationService:
         units = [u for u in session["document"]["units"] if u["plain"]]
         picked = sorted(set(round(i * (len(units) - 1) / max(1, min(12, len(units)) - 1)) for i in range(min(12, len(units)))))
         evidence = [{"id": units[i]["id"], "text": units[i]["plain"][:1600]} for i in picked]
-        request = {"model": session["profile"]["model"], "messages": [{"role": "system", "content": GLOSSARY_SYSTEM}, {"role": "user", "content": json.dumps({"target_language": session["profile"]["to_lang"], "evidence": evidence, "locked": [t for t in session["profile"]["glossary"] if t["locked"]]}, ensure_ascii=False)}], "temperature": 0.0, "max_tokens": 4096}
+        request = {**model_request(session["profile"]["model"]), "messages": [{"role": "system", "content": GLOSSARY_SYSTEM}, {"role": "user", "content": json.dumps({"target_language": session["profile"]["to_lang"], "evidence": evidence, "locked": [t for t in session["profile"]["glossary"] if t["locked"]]}, ensure_ascii=False)}], "temperature": 0.0, "max_tokens": 4096}
         response = self.call(session, request, "sample")
         existing = session["profile"]["glossary"]
         seen = {term_key(t["source_term"]) for t in existing}

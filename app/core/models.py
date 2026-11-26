@@ -45,7 +45,47 @@ SUPPORTED_MODELS = {
         "provider": "openai-compatible",
         "description": "Fast, low-cost DeepSeek translation model",
     },
+    # The provider has no separate "low" model id: every
+    # ``deepseek-v4.1-flash-*`` suffix we tried (``-low``, ``-lite``,
+    # ``-mini``, ``-low-1017``) answers 404 model_not_found. "low" here means
+    # the low-reasoning variant of the same upstream model, selected through
+    # the request parameter instead of a second model name.
+    #
+    # Measured on the calibration preview request (one 550-token chunk):
+    #   reasoning on (plain deepseek-v4.1-flash)  40-90s, 1000-2600 out tokens
+    #   reasoning_effort="low"                    19-26s,  645-865 out tokens
+    #   reasoning_effort="none"                    9s,     224 out tokens
+    # All three returned valid, complete slot JSON. The preview is the first
+    # thing a user waits on, so this entry ships the fastest setting; switch
+    # the value below to "low" for the middle tier.
+    "deepseek-v4.1-flash-low": {
+        "provider": "openai-compatible",
+        "description": "DeepSeek V4.1 Flash, low reasoning (fast)",
+        "upstream": "deepseek-v4.1-flash",
+        "request": {"reasoning_effort": "none"},
+    },
 }
+
+
+def upstream_model(model):
+    """The provider's model id for a supported entry.
+
+    A supported id may be a local variant (``deepseek-v4.1-flash-low``) that
+    the provider does not know; the request must carry the real upstream id.
+    """
+    entry = SUPPORTED_MODELS.get(model) or {}
+    return entry.get("upstream", model)
+
+
+def model_request(model):
+    """Keyword arguments for ``chat.completions.create`` for this model id.
+
+    Returns ``{"model": <upstream id>}`` plus any per-model request extras, so
+    call sites pass ``**model_request(name)`` instead of ``model=name`` and a
+    variant cannot silently send an id the provider rejects.
+    """
+    entry = SUPPORTED_MODELS.get(model) or {}
+    return {"model": entry.get("upstream", model), **entry.get("request", {})}
 
 
 def is_supported_model(model):

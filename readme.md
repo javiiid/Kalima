@@ -88,6 +88,8 @@ and would have lost commit ordering and stop/resume.
 
 Every chunk writes its result to disk. `Ctrl+C`, a dead laptop battery, or a
 crash means "resume from the last healthy spot", not "start from zero".
+If the credit ledger runs dry mid-book, the job pauses (not fails)
+with the exact remaining chunk count, and Resume continues after a top-up.
 
 ---
 
@@ -98,6 +100,7 @@ crash means "resume from the last healthy spot", not "start from zero".
 | 📚 | **EPUB and PDF** | Both formats, with a built-in reader |
 | 🧪 | **Calibration workshop** | Settle voice, glossary, model and budget on 1–3 real samples before the full run |
 | 💰 | **Honest cost estimate** | Real chunk counts, script-aware token estimates, concurrency-aware timing |
+| 💳 | **Credit ledger & clear stops** | Pre-dispatch balance guard; running out pauses the job (resumable) with the exact reason |
 | 🛟 | **Rescue & re-import** | Export a rescue archive, re-import it later without re-paying for done chunks |
 | ⚡ | **12 concurrent chunks** | With adaptive rate limiting |
 | 🔁 | **Stop and resume** | Even after the computer shuts down |
@@ -345,6 +348,8 @@ Rules worth knowing:
 - Reopening the same book with the same configuration keeps drafts, approvals
   and spending — calibration state survives restarts, and an interrupted run is
   marked honestly instead of silently retried.
+- Sample units are translated concurrently by a small worker pool, so a
+  calibration preview no longer serialises one request per sample.
 - Fallback chunks are always marked: the job log and `fallback.json` in the job
   directory record which chunks the fallback model served. Without a configured
   fallback, exhaustion fails exactly as before.
@@ -368,7 +373,8 @@ as "free", not "unknown".
   characters per token instead of one Latin average (deliberately biased high:
   an undercount understates the bill).
 - **Concurrency-aware timing** at `max_concurrency = 12`.
-- **Per-model pricing** for the project's actual models.
+- **Per-model pricing** for the project's actual models, including the
+  DeepSeek V4.1 Flash variants.
 
 ### Rescue archives
 
@@ -377,6 +383,22 @@ text, chunk list, glossary snapshot and settings. Unlike a dead backup, it can
 be **re-imported**: the job returns to a resumable state rebuilt from the
 archive, so already-translated chunks are not paid for twice. The estimate
 dialog is the rescue path for that already-priced remainder work.
+
+### Credit ledger & clear failures
+
+`app/account/billing.py` is the one place that spends the account balance:
+every paid provider call is guarded before it leaves, and calibration settles
+its measured USD cost into the same ledger.
+
+- **Running out of credit pauses, never fails.** When the balance hits zero
+  the job stops as a resumable `paused` job and records the exact position
+  (for example `542 of 587 chunks`), so a top-up followed by **Resume**
+  continues from the last committed chunk instead of dying on the first unit.
+- **Failures are explained.** Every stop writes a user-facing reason and a
+  structured `job_events` row (`error_code`, `action`, remaining chunks) — the
+  old single line "technical details are in the log" is gone.
+- **A cooperative stop is a pause.** Pressing Stop (or a provider-gate abort)
+  parks the job as resumable instead of marking it failed.
 
 ---
 
@@ -705,6 +727,7 @@ engine both read from it.
 | `gpt-5.6-terra` | Higher quality |
 | `gemini-3.1-flash-lite` | Faster and cheaper |
 | `deepseek-v4.1-flash` | Fast and low-cost DeepSeek model |
+| `deepseek-v4.1-flash-low` | DeepSeek V4.1 Flash with reasoning disabled (`reasoning_effort: none`) — fastest and cheapest |
 
 To switch, change one line in `config/config.yaml`. Form and pipeline move together.
 

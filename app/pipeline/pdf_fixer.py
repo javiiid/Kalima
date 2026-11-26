@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import fitz  # PyMuPDF
+from app.core.models import model_request
 
 
 # ============================================================
@@ -237,7 +238,7 @@ def translate_pages(
         # ----------------------------------------------------
 
         response = client.chat.completions.create(
-            model=model,
+            **model_request(model),
             temperature=0.2,
             messages=[
                 {

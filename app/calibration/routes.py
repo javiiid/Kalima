@@ -52,6 +52,35 @@ def start_job(service, session):
     return {"id": identifier}
 
 
+def recover_missing_job(service, session):
+    """Return a session whose ``job_id`` points at no job to a startable state.
+
+    ``claim_start`` records the job id before the in-memory job exists. If the
+    start then fails, or the server restarts before the job is persisted, the
+    session keeps a dangling id: the workshop hides the start button and offers
+    only a link to a monitor page that answers 404. Once the job is neither
+    live nor on disk there is nothing to resume, so the id is cleared and the
+    session goes back to the calibrated state.
+    """
+    identifier = session.get("job_id")
+    if not identifier:
+        return session
+    from app import web
+    with web.JOBS_LOCK:
+        live = identifier in web.JOBS
+    if live or (web.JOB_META_DIR / f"{identifier}.json").exists():
+        return session
+
+    def reset(state):
+        if state.get("job_id") == identifier:
+            state["job_id"] = None
+            state["state"] = "CALIBRATED_AND_ESTIMATED"
+            state["revision"] += 1
+
+    session = service.store.change(session["id"], reset)
+    return session
+
+
 def handle(handler, method):
     path = urlparse(handler.path).path
     if not (path == "/api/calibrations" or path.startswith("/api/calibrations/") or path.startswith("/api/calibration-operations/")):
@@ -85,7 +114,7 @@ def handle(handler, method):
         bits = path.split("/")
         identifier = bits[3]
         if method == "GET" and len(bits) == 4:
-            handler._json(service.payload(service.store.get(identifier)))
+            handler._json(service.payload(recover_missing_job(service, service.store.get(identifier))))
             return True
         body = handler._request_json()
         action = bits[4] if len(bits) == 5 else ""

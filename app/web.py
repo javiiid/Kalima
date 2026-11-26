@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -455,10 +456,15 @@ def _persist_job(job: Job) -> None:
         pass
 
 
-def _job_event(job: Job, event: str, message: str, level: str = "INFO") -> None:
-    """Record a user-facing job event without affecting translation flow."""
+def _job_event(job: Job, event: str, message: str, level: str = "INFO", data: dict | None = None) -> None:
+    """Record a user-facing job event without affecting translation flow.
+
+    ``data`` is stored in ``job_events.data_json`` so the monitor can show a
+    machine-readable reason (``error_code``, ``action``, remaining chunks)
+    next to the human message instead of a single opaque sentence.
+    """
     try:
-        db.record_event(job.id, level, event, message, recoverable=level != "ERROR")
+        db.record_event(job.id, level, event, message, recoverable=level != "ERROR", data=data)
     except Exception:
         pass
 
@@ -666,6 +672,8 @@ def _safe_filename(name: str) -> str:
 
 
 def _friendly_error(error: Exception) -> str:
+    if isinstance(error, account_billing.InsufficientCredit):
+        return "اعتبار حساب تمام شد. از پنل حساب اعتبار شارژ کنید و سپس دکمهٔ «ادامه» را بزنید."
     text = str(error).lower()
     if "missing 'openai" in text or "api configuration" in text or "api_key" in text:
         return "کلید یا Base URL سرویس ترجمه تنظیم نشده است. از پنل کاربری ← تنظیمات سرویس ترجمه آن را وارد کنید."
@@ -683,7 +691,47 @@ def _friendly_error(error: Exception) -> str:
         return "پاسخ Provider بیش از حد طول کشید؛ اینترنت یا وضعیت سرویس را بررسی کنید."
     if "connection" in text or "network" in text:
         return "ارتباط با Provider برقرار نشد. اینترنت، Firewall و Base URL را بررسی کنید."
-    return "ترجمه متوقف شد. جزئیات فنی در لاگ در دسترس است."
+    detail = str(error).strip()
+    if detail:
+        return f"ترجمه به‌دلیل خطای غیرمنتظره متوقف شد ({type(error).__name__}): {detail[:200]}"
+    return "ترجمه به‌دلیل خطای غیرمنتظره متوقف شد."
+
+
+def _describe_job_error(job: Job, error: Exception) -> tuple[str, str, dict]:
+    """Return ``(user_message, error_code, event_data)`` for a job that stopped.
+
+    Running out of credit is not a bug: every remaining chunk would be an
+    unpaid provider call, so the job must stop. But it stops as a *resumable
+    pause* with an actionable message, not a generic "failed", so a top-up
+    followed by Resume continues from the last committed chunk. Every other
+    error keeps the failure path but now carries a code and a hint for the log.
+    """
+    if isinstance(error, account_billing.InsufficientCredit):
+        completed = int(job.progress.get("completed") or 0)
+        total = int(job.progress.get("total") or 0)
+        remaining = max(0, total - completed) if total else 0
+        if total:
+            message = (
+                f"اعتبار حساب تمام شد؛ {completed} از {total} چانک ترجمه شد و "
+                f"{remaining} چانک باقی مانده است. از پنل حساب اعتبار شارژ کنید و سپس "
+                "دکمهٔ «ادامه» را بزنید تا ترجمه از همین نقطه ادامه پیدا کند."
+            )
+        else:
+            message = (
+                "اعتبار حساب تمام شد. از پنل حساب اعتبار شارژ کنید و سپس دکمهٔ «ادامه» را بزنید."
+            )
+        return message, "insufficient_credit", {
+            "error_code": "insufficient_credit",
+            "action": "top_up_and_resume",
+            "completed": completed,
+            "total": total,
+            "remaining": remaining,
+        }
+    return _friendly_error(error), "translation_error", {
+        "error_code": "translation_error",
+        "action": "check_provider_settings",
+        "exception": type(error).__name__,
+    }
 
 
 def _candidate_provider_config(payload: dict) -> tuple[dict[str, str], str]:
@@ -796,12 +844,33 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
             _job_event(job, job.status, "ترجمه با موفقیت تکمیل شد." if job.status == "completed" else "ترجمه در نقطهٔ امن متوقف شد.")
             if job.status == "paused":
                 print("Job paused safely. Use Resume to continue from saved progress.")
-        except BaseException as exc:
+        except KeyboardInterrupt:
+            # A cooperative stop (user pressed Stop, or the provider gate
+            # aborted a wait) is a safe pause with resumable state, never a
+            # failure. TranslationStopped subclasses KeyboardInterrupt.
             _update_progress(job)
-            job.status, job.error = "failed", _friendly_error(exc)
+            job.status = "cancelled" if job.cancel_requested else "paused"
+            job.error = None
             job.last_activity = job.updated_at = now()
             _persist_job(job)
-            _job_event(job, "failed", job.error or "ترجمه با خطا متوقف شد.", "ERROR")
+            _job_event(job, job.status, "ترجمه به‌درخواست کاربر متوقف شد؛ از همین نقطه قابل ادامه است.")
+        except BaseException as exc:
+            _update_progress(job)
+            message, code, data = _describe_job_error(job, exc)
+            if code == "insufficient_credit":
+                # Pause, not fail: every committed chunk is safe and a resume
+                # after a top-up continues exactly where it stopped instead of
+                # failing again on the first unit.
+                job.status, job.error = "paused", message
+                job.last_activity = job.updated_at = now()
+                _persist_job(job)
+                _job_event(job, "paused", message, "WARNING", data)
+                print(f"Job paused (insufficient credit): {message}")
+            else:
+                job.status, job.error = "failed", message
+                job.last_activity = job.updated_at = now()
+                _persist_job(job)
+                _job_event(job, "failed", message, "ERROR", data)
             traceback.print_exc()
         finally:
             if job.options.get("calibration_id"):
@@ -1212,7 +1281,7 @@ def library_summary(query: str = "", user_id: int | None = None) -> dict:
 
 PAGE = r'''<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KALIMA</title><style>
 @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap');:root{--bg:#f4f7fb;--surface:#fff;--ink:#142033;--muted:#6d7a90;--line:#e3e9f2;--blue:#356df6;--purple:#7257e8;--cyan:#0ca6a6;--green:#08966c;--red:#e24a4a;--shadow:0 18px 55px rgba(38,57,93,.08)}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 0,#e6efff 0,transparent 32%),radial-gradient(circle at 96% 11%,#eee9ff 0,transparent 27%),var(--bg);font:15px Vazirmatn,Segoe UI,Tahoma,sans-serif;color:var(--ink)}.shell{max-width:1180px;margin:auto;padding:34px 22px 62px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:26px}.brand{display:flex;align-items:center;gap:14px}.logo{width:49px;height:49px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(140deg,var(--blue),var(--purple));color:#fff;font-size:25px;box-shadow:0 9px 24px #506ff466}.brand h1{font-size:22px;margin:0;font-weight:800}.brand p{margin:3px 0 0;color:var(--muted);font-size:13px}.api-pill{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--muted);font-size:12px;box-shadow:0 4px 16px #26395a0a}.dot{width:8px;height:8px;border-radius:50%;background:#aeb8c7}.dot.ready{background:var(--green);box-shadow:0 0 0 4px #12b9811b}.dot.error{background:var(--red)}.dashboard{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px}.card{background:rgba(255,255,255,.92);border:1px solid rgba(224,230,240,.9);border-radius:20px;box-shadow:var(--shadow)}.form-card{padding:27px}.side{display:grid;gap:20px;align-content:start}.side .card{padding:21px}.section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:23px}.section-title h2{font-size:18px;margin:0}.step{font-size:12px;color:var(--blue);background:#edf3ff;padding:5px 10px;border-radius:999px}.drop{position:relative;border:1.5px dashed #9ab4eb;background:linear-gradient(135deg,#f8faff,#f0f5ff);border-radius:15px;min-height:136px;display:grid;place-items:center;text-align:center;padding:18px;transition:.2s}.drop.drag{border-color:var(--blue);background:#eaf1ff}.drop input{position:absolute;inset:0;width:100%;opacity:0;cursor:pointer}.upload-icon{font-size:28px;color:var(--blue)}.drop strong{display:block;margin:5px 0 3px}.drop small{color:var(--muted)}.file-info{display:none;margin-top:12px;padding:10px 12px;background:#eff8f5;border-radius:9px;color:#166b55;font-size:13px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}label{display:block;font-size:13px;font-weight:700;margin:18px 0 7px}input,select,textarea{width:100%;font:inherit;border:1px solid #d9e1ed;border-radius:10px;padding:10px 12px;background:#fff;color:var(--ink)}input:focus,select:focus,textarea:focus{outline:0;border-color:var(--blue);box-shadow:0 0 0 3px #356df61a}textarea{resize:vertical;min-height:100px}.optional{font-weight:400;color:var(--muted)}.advanced{margin-top:17px}.advanced summary{cursor:pointer;color:var(--blue);font-weight:700;font-size:13px}.check{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin-top:14px}.check input{width:auto;accent-color:var(--blue)}button{border:0;font:700 14px Vazirmatn,Segoe UI,sans-serif;cursor:pointer;border-radius:10px;padding:12px 15px;transition:.15s}button:hover:not(:disabled){filter:brightness(.97);transform:translateY(-1px)}button:disabled{cursor:not-allowed;opacity:.55}.primary{width:100%;margin-top:21px;color:#fff;background:linear-gradient(135deg,var(--blue),#5a62e8);box-shadow:0 10px 20px #4268d338}.secondary{background:#eef3ff;color:#2d5ed4}.danger{background:#fff0f0;color:#ca3636}.intro{display:flex;gap:11px;line-height:1.8;color:#506078;font-size:13px}.intro i{font-style:normal;display:grid;place-items:center;min-width:34px;height:34px;border-radius:10px;background:#eaf1ff;color:var(--blue)}.fact{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line);font-size:13px}.fact span{color:var(--muted)}.job{display:none;margin-top:20px;padding:23px}.job-head{display:flex;justify-content:space-between;align-items:flex-start;gap:15px}.job-name{font-weight:800;font-size:16px;word-break:break-word}.job-meta{margin-top:4px;color:var(--muted);font-size:12px}.chip{white-space:nowrap;font-size:12px;font-weight:700;border-radius:999px;padding:6px 10px;background:#f0f3f7;color:#687587}.chip.running{background:#eaf1ff;color:#2b62df}.chip.completed{background:#e6f8f1;color:#087d5c}.chip.stopped,.chip.finished{background:#fff5df;color:#a96b00}.chip.failed{background:#fff0f0;color:#c03636}.progress-row{display:flex;justify-content:space-between;margin:21px 0 8px;font-size:13px;font-weight:700}.progress-track{height:10px;background:#e9eef7;border-radius:99px;overflow:hidden}.progress-value{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:width .45s}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:16px}.stat{background:#f8faff;border:1px solid #edf1f7;border-radius:11px;padding:10px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:3px}.stat strong{font-size:13px}.job-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}.job-actions button,.download{padding:9px 12px;text-decoration:none;display:inline-block}.download{border-radius:10px;background:var(--green);color:#fff;font-size:13px;font-weight:700}.error{display:none;margin-top:14px;background:#fff2f2;color:#a93434;border:1px solid #ffd9d9;border-radius:10px;padding:11px;font-size:13px}.logs{margin-top:19px}.logs summary{cursor:pointer;color:var(--muted);font-weight:700;font-size:13px}.logs pre{direction:ltr;text-align:left;white-space:pre-wrap;max-height:280px;overflow:auto;background:#101827;color:#c9f8df;border-radius:11px;padding:13px;font:12px ui-monospace,Consolas,monospace}.small{font-size:12px;color:var(--muted)}@media(max-width:850px){.dashboard{grid-template-columns:1fr}.side{grid-template-columns:1fr 1fr}.top{align-items:flex-start}}@media(max-width:570px){.shell{padding:22px 13px}.top{display:block}.api-pill{display:inline-flex;margin-top:14px}.form-card{padding:19px}.grid2,.side,.stats{grid-template-columns:1fr}.job-head{display:block}.chip{display:inline-block;margin-top:10px}}
-</style></head><body><main class="shell"><header class="top"><div class="brand"><div class="logo">__KALIMA_LOGO__</div><div><h1>KALIMA</h1><p>داشبورد ترجمهٔ امن EPUB و PDF</p></div></div><div class="api-pill"><i class="dot" id="api-dot"></i><span id="api-status">در حال بررسی تنظیمات API…</span><button class="secondary" id="verify-api" aria-label="بررسی اتصال provider" style="padding:5px 9px;font-size:11px">بررسی اتصال</button></div></header><div class="dashboard"><section><div class="card form-card"><div class="section-title"><h2>ترجمهٔ جدید</h2><span class="step">گام ۱ از ۱</span></div><form id="translate-form"><div class="drop" id="drop"><input required type="file" id="book" name="book" accept=".epub,.pdf"><div><div class="upload-icon">⇧</div><strong>کتاب را اینجا رها کنید یا انتخاب کنید</strong><small>فرمت‌های EPUB و PDF تا حداکثر ۱ گیگابایت</small></div></div><div class="file-info" id="file-info"></div><div class="grid2"><div><label>زبان مبدأ</label><select name="from_lang"><option value="EN" selected>انگلیسی</option><option value="FA">فارسی</option><option value="AR">عربی</option><option value="FR">فرانسوی</option><option value="DE">آلمانی</option><option value="ES">اسپانیایی</option><option value="IT">ایتالیایی</option><option value="RU">روسی</option><option value="TR">ترکی</option><option value="ZH">چینی</option><option value="JA">ژاپنی</option><option value="KO">کره‌ای</option></select></div><div><label>زبان مقصد</label><select name="to_lang"><option value="EN">انگلیسی</option><option value="FA" selected>فارسی</option><option value="AR">عربی</option><option value="FR">فرانسوی</option><option value="DE">آلمانی</option><option value="ES">اسپانیایی</option><option value="IT">ایتالیایی</option><option value="RU">روسی</option><option value="TR">ترکی</option><option value="ZH">چینی</option><option value="JA">ژاپنی</option><option value="KO">کره‌ای</option></select></div></div><div class="grid2"><div><label>مدل ترجمه</label><select name="model" aria-label="مدل ترجمه"><option value="gpt-5.6-terra">gpt-5.6-terra — High-quality translation model</option><option value="gpt-5.6-luna">gpt-5.6-luna — Primary translation model</option><option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite — Fast, lower-cost translation model</option><option value="deepseek-v4.1-flash">deepseek-v4.1-flash — Fast, low-cost DeepSeek translation model</option></select></div><div><label>حالت اجرا</label><select name="mode"><option value="">سریع (پیشنهادی)</option><option value="pdfbilingual">PDF دوزبانه</option></select></div></div><details class="advanced"><summary>تنظیمات پیشرفته و دستور ترجمه</summary><label>دستور ترجمه <span class="optional">(اختیاری)</span></label><textarea name="prompt" placeholder="خالی بگذارید تا دستور استاندارد برنامه استفاده شود."></textarea><label class="check"><input type="checkbox" name="debug" value="true" checked>نگهداری فایل‌های موقت برای ادامهٔ امن کار</label></details><button class="primary" id="submit" type="submit">شروع ترجمه</button></form></div><section class="card job" id="job"><div class="job-head"><div><div class="job-name" id="job-name"></div><div class="job-meta" id="job-meta"></div></div><span class="chip" id="chip">در انتظار</span></div><div class="progress-row"><span id="progress-label">در حال آماده‌سازی…</span><span id="percent">۰٪</span></div><div class="progress-track"><div class="progress-value" id="progress"></div></div><div class="stats"><div class="stat"><span>Chunk تکمیل‌شده</span><strong id="completed">۰</strong></div><div class="stat"><span>زمان شروع</span><strong id="started">—</strong></div><div class="stat"><span>آخرین فعالیت</span><strong id="activity">—</strong></div></div><div class="error" id="error"></div><div id="quality-box" style="display:none;margin-top:12px;padding:14px;background:#f0f7ff;border:1px solid #356df633;border-radius:12px"><div class="section-title"><h2>گزارش کیفیت</h2></div><div id="quality-content"></div></div><div class="job-actions"><button class="danger" hidden id="stop">توقف امن</button><button class="secondary" hidden id="resume">ادامهٔ ترجمه</button><a class="download" hidden id="download">دریافت خروجی</a></div><details class="logs"><summary>نمایش لاگ فنی</summary><pre id="log"></pre></details></section></section><aside class="side"><div class="card"><div class="section-title"><h2>پیش از شروع</h2></div><div class="intro"><i>✓</i><div>کلید API هرگز به مرورگر ارسال یا در صفحه نمایش داده نمی‌شود. فایل‌ها فقط روی همین دستگاه پردازش می‌شوند.</div></div></div><div class="card"><div class="section-title"><h2>تنظیمات فعال</h2></div><div class="fact"><span>محدودهٔ اجرا</span><strong>فقط محلی</strong></div><div class="fact"><span>ذخیرهٔ پیشرفت</span><strong>بعد از هر chunk</strong></div><div class="fact"><span>ادامهٔ کار</span><strong>برای EPUB</strong></div><p class="small">برای توقف امن، درخواست در حال اجرا تمام و ذخیره می‌شود؛ سپس ترجمه پیش از chunk بعدی متوقف خواهد شد.</p></div></aside></div></main><script>
+</style></head><body><main class="shell"><header class="top"><div class="brand"><div class="logo">__KALIMA_LOGO__</div><div><h1>KALIMA</h1><p>داشبورد ترجمهٔ امن EPUB و PDF</p></div></div><div class="api-pill"><i class="dot" id="api-dot"></i><span id="api-status">در حال بررسی تنظیمات API…</span><button class="secondary" id="verify-api" aria-label="بررسی اتصال provider" style="padding:5px 9px;font-size:11px">بررسی اتصال</button></div></header><div class="dashboard"><section><div class="card form-card"><div class="section-title"><h2>ترجمهٔ جدید</h2><span class="step">گام ۱ از ۱</span></div><form id="translate-form"><div class="drop" id="drop"><input required type="file" id="book" name="book" accept=".epub,.pdf"><div><div class="upload-icon">⇧</div><strong>کتاب را اینجا رها کنید یا انتخاب کنید</strong><small>فرمت‌های EPUB و PDF تا حداکثر ۱ گیگابایت</small></div></div><div class="file-info" id="file-info"></div><div class="grid2"><div><label>زبان مبدأ</label><select name="from_lang"><option value="EN" selected>انگلیسی</option><option value="FA">فارسی</option><option value="AR">عربی</option><option value="FR">فرانسوی</option><option value="DE">آلمانی</option><option value="ES">اسپانیایی</option><option value="IT">ایتالیایی</option><option value="RU">روسی</option><option value="TR">ترکی</option><option value="ZH">چینی</option><option value="JA">ژاپنی</option><option value="KO">کره‌ای</option></select></div><div><label>زبان مقصد</label><select name="to_lang"><option value="EN">انگلیسی</option><option value="FA" selected>فارسی</option><option value="AR">عربی</option><option value="FR">فرانسوی</option><option value="DE">آلمانی</option><option value="ES">اسپانیایی</option><option value="IT">ایتالیایی</option><option value="RU">روسی</option><option value="TR">ترکی</option><option value="ZH">چینی</option><option value="JA">ژاپنی</option><option value="KO">کره‌ای</option></select></div></div><div class="grid2"><div><label>مدل ترجمه</label><select name="model" aria-label="مدل ترجمه"><option value="gpt-5.6-terra">gpt-5.6-terra — High-quality translation model</option><option value="gpt-5.6-luna">gpt-5.6-luna — Primary translation model</option><option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite — Fast, lower-cost translation model</option><option value="deepseek-v4.1-flash">deepseek-v4.1-flash — Fast, low-cost DeepSeek translation model</option><option value="deepseek-v4.1-flash-low">deepseek-v4.1-flash-low — DeepSeek V4.1 Flash, low reasoning (fast)</option></select></div><div><label>حالت اجرا</label><select name="mode"><option value="">سریع (پیشنهادی)</option><option value="pdfbilingual">PDF دوزبانه</option></select></div></div><details class="advanced"><summary>تنظیمات پیشرفته و دستور ترجمه</summary><label>دستور ترجمه <span class="optional">(اختیاری)</span></label><textarea name="prompt" placeholder="خالی بگذارید تا دستور استاندارد برنامه استفاده شود."></textarea><label class="check"><input type="checkbox" name="debug" value="true" checked>نگهداری فایل‌های موقت برای ادامهٔ امن کار</label></details><button class="primary" id="submit" type="submit">شروع ترجمه</button></form></div><section class="card job" id="job"><div class="job-head"><div><div class="job-name" id="job-name"></div><div class="job-meta" id="job-meta"></div></div><span class="chip" id="chip">در انتظار</span></div><div class="progress-row"><span id="progress-label">در حال آماده‌سازی…</span><span id="percent">۰٪</span></div><div class="progress-track"><div class="progress-value" id="progress"></div></div><div class="stats"><div class="stat"><span>Chunk تکمیل‌شده</span><strong id="completed">۰</strong></div><div class="stat"><span>زمان شروع</span><strong id="started">—</strong></div><div class="stat"><span>آخرین فعالیت</span><strong id="activity">—</strong></div></div><div class="error" id="error"></div><div id="quality-box" style="display:none;margin-top:12px;padding:14px;background:#f0f7ff;border:1px solid #356df633;border-radius:12px"><div class="section-title"><h2>گزارش کیفیت</h2></div><div id="quality-content"></div></div><div class="job-actions"><button class="danger" hidden id="stop">توقف امن</button><button class="secondary" hidden id="resume">ادامهٔ ترجمه</button><a class="download" hidden id="download">دریافت خروجی</a></div><details class="logs"><summary>نمایش لاگ فنی</summary><pre id="log"></pre></details></section></section><aside class="side"><div class="card"><div class="section-title"><h2>پیش از شروع</h2></div><div class="intro"><i>✓</i><div>کلید API هرگز به مرورگر ارسال یا در صفحه نمایش داده نمی‌شود. فایل‌ها فقط روی همین دستگاه پردازش می‌شوند.</div></div></div><div class="card"><div class="section-title"><h2>تنظیمات فعال</h2></div><div class="fact"><span>محدودهٔ اجرا</span><strong>فقط محلی</strong></div><div class="fact"><span>ذخیرهٔ پیشرفت</span><strong>بعد از هر chunk</strong></div><div class="fact"><span>ادامهٔ کار</span><strong>برای EPUB</strong></div><p class="small">برای توقف امن، درخواست در حال اجرا تمام و ذخیره می‌شود؛ سپس ترجمه پیش از chunk بعدی متوقف خواهد شد.</p></div></aside></div></main><script>
 const $=s=>document.querySelector(s),form=$('#translate-form'),submit=$('#submit'),jobBox=$('#job'),drop=$('#drop'),book=$('#book'),fileInfo=$('#file-info'),apiDot=$('#api-dot'),apiStatus=$('#api-status');let jobId,timer;const fa=n=>new Intl.NumberFormat('fa-IR').format(n||0),date=v=>v?new Intl.DateTimeFormat('fa-IR',{hour:'2-digit',minute:'2-digit',year:'numeric',month:'short',day:'numeric'}).format(new Date(v)):'—',size=n=>n<1024*1024?(n/1024).toFixed(0)+' KB':(n/1024/1024).toFixed(1)+' MB';function fileChanged(){const f=book.files[0];if(!f){fileInfo.style.display='none';return}fileInfo.textContent=`${f.name} · ${f.name.split('.').pop().toUpperCase()} · ${size(f.size)}`;fileInfo.style.display='block'}book.addEventListener('change',fileChanged);['dragenter','dragover'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer&&e.dataTransfer.files[0]){book.files=e.dataTransfer.files;fileChanged()}});async function health(verify=false){try{const r=await fetch('/api/health'+(verify?'?verify=1':'')),d=await r.json();apiStatus.textContent=d.message;apiDot.className='dot '+(d.status==='ready'?'ready':'error')}catch{apiStatus.textContent='وضعیت API نامشخص است';apiDot.className='dot error'}}$('#verify-api').onclick=()=>health(true);health();form.addEventListener('submit',async e=>{e.preventDefault();if(!book.files[0])return;submit.disabled=true;submit.textContent='در حال ایجاد کار…';try{const r=await fetch('/api/jobs',{method:'POST',body:new FormData(form)}),d=await r.json();if(!r.ok)throw Error(d.error||'ایجاد job ناموفق بود');jobId=d.id;if(window.jbtGlossary&&d.book_id)window.jbtGlossary.setBook(d.book_id,d.from_lang,d.to_lang);jobBox.style.display='block';$('#error').style.display='none';watch()}catch(err){alert(err.message);submit.disabled=false;submit.textContent='شروع ترجمه'}});async function action(name){if(!jobId)return;const r=await fetch(`/api/jobs/${jobId}/${name}`,{method:'POST'}),d=await r.json();if(!r.ok)alert(d.error||'عملیات انجام نشد');watch()}$('#stop').onclick=()=>action('stop');$('#resume').onclick=()=>action('resume');function render(d){const p=d.progress;$('#job-name').textContent=d.filename;$('#job-meta').textContent=`${d.filetype} · ${size(d.file_size)} · ${d.id}`;$('#chip').textContent={queued:'در صف',running:'در حال ترجمه',stopping:'در حال توقف',stopped:'متوقف شده',completed:'تکمیل شد',finished:'پایان یافت',failed:'خطا'}[d.status]||d.status;$('#chip').className='chip '+d.status;$('#progress').style.width=p.percent+'%';$('#percent').textContent=fa(p.percent)+'٪';$('#progress-label').textContent=p.total?`${fa(p.completed)} از ${fa(p.total)} chunk`:'در حال آماده‌سازی chunkها…';$('#completed').textContent=p.total?`${fa(p.completed)} / ${fa(p.total)}`:fa(p.completed);$('#started').textContent=date(d.started_at);$('#activity').textContent=date(d.last_activity);$('#log').textContent=d.log||'در انتظار شروع…';const error=$('#error');error.textContent=d.error||'';error.style.display=d.error?'block':'none';const ql=document.getElementById('quality-box');if(ql){ql.style.display=d.quality?'block':'none';if(d.quality){document.getElementById('quality-content').innerHTML='<div style="padding:8px 0"><strong>Quality Report</strong><br>Total chunks: '+d.quality.total_chunks+' · Flagged: '+d.quality.flagged_count+' · Average: '+d.quality.average_composite+'</div>'}}$('#stop').hidden=!d.can_stop;$('#resume').hidden=!d.can_resume;const dl=$('#download');dl.hidden=!d.download;if(d.download)dl.href=d.download;const active=['queued','running','stopping'].includes(d.status);if(!active){clearInterval(timer);submit.disabled=false;submit.textContent='شروع ترجمه'}}function watch(){clearInterval(timer);const tick=async()=>{try{const r=await fetch('/api/jobs/'+jobId),d=await r.json();if(!r.ok)throw Error();render(d)}catch{clearInterval(timer)}};tick();timer=setInterval(tick,1000)}
 </script></body></html>'''.replace("__DEFAULT_MODEL__", DEFAULT_MODEL)
 
@@ -2952,4 +3021,33 @@ def main() -> None:
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
-if __name__ == "__main__": main()
+def _publish_as_canonical_module(module_name: str | None = None, registry: dict | None = None) -> None:
+    """Make ``from app import web`` resolve to the module that is running.
+
+    ``python -m app.web`` executes this file as ``__main__`` and never
+    registers it under ``app.web``. A later ``from app import web`` -- the
+    calibration routes do exactly that -- would then import a *second* copy
+    with its own ``JOBS``, ``_SCHEDULER`` and ``Job`` class. A job created in
+    that copy is invisible to the running server, which is how starting a
+    calibrated book landed on the monitor with "job not found".
+
+    Registering the running module under its canonical name makes every later
+    import resolve to this single instance. A normal ``import app.web`` is
+    already registered, so ``setdefault`` leaves it untouched.
+    """
+    registry = sys.modules if registry is None else registry
+    name = __name__ if module_name is None else module_name
+    if name == "app.web":
+        return
+    module = registry.get(name)
+    if module is None:
+        return
+    registry.setdefault("app.web", module)
+    parent = registry.get("app")
+    if parent is not None:
+        setattr(parent, "web", module)
+
+
+if __name__ == "__main__":
+    _publish_as_canonical_module()
+    main()

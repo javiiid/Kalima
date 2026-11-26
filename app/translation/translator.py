@@ -769,6 +769,8 @@ def translate_chunk(
         Execute exactly one API request on the given model.
         """
 
+        from app.core.models import model_request
+
         print(
             f"API request for chunk {chunk_id} "
             f"({active_model}) [translate_chunk]"
@@ -801,7 +803,7 @@ def translate_chunk(
 
         try:
             response = client.chat.completions.create(
-                model=active_model,
+                **model_request(active_model),
                 messages=messages,
                 temperature=preset_params.get("temperature", 0.2),
                 top_p=preset_params.get("top_p", 1.0),

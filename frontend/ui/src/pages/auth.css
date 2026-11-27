@@ -1,71 +1,1501 @@
-/* --------------------------------------------------------------------------
-   The auth page (local login / signup).
+/* ==========================================================================
+   KALIMA — authentication (login, signup, password recovery)
 
-   Split out of `tokens.css` the way `landing.css` is: the file next to the
-   page that owns it, imported by that page. Layout only -- every colour,
-   type step, spacing step, radius and control comes from tokens.css, so
-   nothing here introduces a hue or a hex.
+   The auth pages are the landing page's next step, not a settings dialog. The
+   landing establishes an ink surface with an emerald accent and Geist display
+   type; these pages carry the same world so signing up feels like continuing
+   the page you were just reading.
+
+   WHAT THIS FILE OWNS
+   -------------------
+   Layout, composition and motion. Every colour, radius and easing comes from
+   the `--k-*` roles in `styles/ink.css` -- the same roles the landing reads --
+   so there is one definition of the palette and no hex literal below this
+   comment. The app's `tokens.css` is deliberately untouched: internal pages
+   keep their blue system and their own contrast guarantees.
+
+   THE COMPOSITION
+   ---------------
+   A split screen. The brand half is ink, editorial, and mostly quiet: a mark,
+   a statement, three facts, and one slow ambient field behind them. The form
+   half is the working surface -- a slightly lifted panel on the same ink, so
+   the eye lands on the form without the two halves reading as separate pages.
+
+   On a phone the split collapses to one column: the brand half becomes a
+   compact masthead above the form rather than disappearing. Signing in on a
+   phone should still say whose product this is.
+
+   MOTION
+   ------
+   Entrance only, staggered by field, and every transition is a state change
+   (focus, hover, press, error). Nothing loops. The one ambient element in the
+   brand half is a slow drift on a static gradient, and it is removed entirely
+   under `prefers-reduced-motion` along with every other transition here.
+   ========================================================================== */
+
+.k-auth {
+  position: relative;
+  isolation: isolate;
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--k-ink);
+  color: var(--k-text);
+  font-family: var(--k-font);
+  font-size: 1rem;
+  font-weight: 450;
+  line-height: 1.6;
+  accent-color: var(--k-emerald);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.k-auth,
+.k-auth *,
+.k-auth *::before,
+.k-auth *::after {
+  box-sizing: border-box;
+}
+
+.k-auth :where(h1, h2, h3, p, ul, ol, figure) {
+  margin: 0;
+  padding: 0;
+}
+
+.k-auth :where(ul, ol) {
+  list-style: none;
+}
+
+.k-auth h1,
+.k-auth h2,
+.k-auth h3 {
+  font-family: var(--k-font);
+  font-weight: 600;
+  color: inherit;
+  text-wrap: balance;
+}
+
+.k-auth p {
+  text-wrap: pretty;
+}
+
+.k-auth a {
+  color: inherit;
+}
+
+.k-auth img,
+.k-auth svg {
+  display: block;
+}
+
+.k-auth button {
+  font: inherit;
+  color: inherit;
+}
+
+/* Persian runs resolve through Vazirmatn first. Geist has no Arabic-script
+   coverage, so without this a Persian page would fall back per-glyph. */
+.k-auth[dir='rtl'],
+.k-auth [dir='rtl'] {
+  font-family: var(--k-font-fa);
+}
+
+/* --------------------------------------------------------------------------
+   The page
+
+   One column, one card, centred. The old layout was a split screen with a
+   brand half; the card carries the brand now (its mark, its heading, its
+   tagline below), so a second panel stating the same thing would be the page
+   arguing with itself.
+
+   The page is a grid with `place-items: center` and a minimum height, which
+   centres the card without a transform. A transform-centred card would fight
+   the tilt: `translate(-50%, -50%)` and `rotateY()` are the same property, and
+   the second one wins.
    -------------------------------------------------------------------------- */
 
-.auth-shell {
-  width: min(28rem, 100%);
+.k-auth-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(1.25rem, 3vw, 2rem);
+  min-height: 100dvh;
+  /* The shared `.page` gutter is zeroed for this surface (the card owns its
+     own padding), so the page has to supply the inline gutter itself or the
+     card sits flush against a phone's edges. */
+  padding-block: clamp(1.5rem, 4vw, 3rem);
+  padding-inline: clamp(1rem, 4vw, 2rem);
+  /* The ambient field bleeds past the card by design; the page is what stops
+     that bleed from becoming a horizontal scrollbar. */
+  overflow-x: clip;
+}
+
+/* The utility row sits above the card and shares its measure, so the language
+   switch lines up with the card's edge rather than the viewport's. */
+.k-auth-utility {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 27rem;
   margin-inline: auto;
+}
+
+/* The card's own measure. Wider than the old panel because the card has its
+   own padding now, and a 25.5rem card with 2.25rem of padding on each side
+   leaves a 21rem form -- too narrow for a Persian label beside its hint. */
+.k-auth-stage {
+  width: 100%;
+  max-width: 27rem;
+  margin-inline: auto;
+}
+
+.k-auth-card-inner {
   min-width: 0;
-  padding-block: var(--spacing-8);
+  /* The height is driven imperatively by `useAnimatedHeight` (it pins a pixel
+     value, then releases to auto). Without this declaration the pinned height
+     would change instantly and the whole point -- the card growing and
+     shrinking between login and signup -- would be a jump. */
+  transition: height 320ms var(--k-card-ease);
 }
 
-/* Two-option segmented control. Real buttons with `aria-pressed`, the same
-   contract as the library filter tabs: the selected one announces itself. */
-.auth-tabs {
+/* The tagline under the card. The landing page closes on these words, so the
+   last thing on the auth page is the same sentence the visitor arrived from. */
+.k-auth-tagline {
+  color: var(--k-faint);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   Form half
+   -------------------------------------------------------------------------- */
+
+/* The app's `.page` supplies the internal gutter. The auth panel owns its own
+   spacing, but the main still carries `.page` so the shared page contract (and
+   the responsive test) stays true -- the same arrangement the landing uses. */
+.k-auth .page {
+  width: 100%;
+  /* Not `padding: 0`: that rule was written for the old split screen, where
+     the panel supplied its own gutter. On a single centred card the page owns
+     the inline gutter, and zeroing it here put the card flush against a
+     phone's edges. The `.k-auth-page` rule below sets both axes. */
+}
+
+/* The panel's own top row: language, and the way back to the landing page.
+   It sits above the heading so the heading stays the first thing in the
+   reading order of the form itself. */
+.k-auth-utility {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: clamp(1.5rem, 3vw, 2.5rem);
+}
+
+.k-auth-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  color: var(--k-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-decoration: none;
+  transition: color 180ms var(--k-ease);
+}
+
+.k-auth-home:hover {
+  color: var(--k-text);
+}
+
+.k-auth-home svg {
+  transition: transform 200ms var(--k-ease);
+}
+
+/* "Back" points toward the reading-start edge, which flips with direction.
+   The glyph is drawn pointing left, so an RTL page mirrors it rather than
+   shipping a second icon -- a left-pointing arrow in a Persian interface
+   points forward, which is the opposite of what the control says. */
+.k-auth[dir='rtl'] .k-auth-home svg,
+.k-auth[dir='rtl'] .k-auth-back svg {
+  transform: scaleX(-1);
+}
+
+.k-auth-home:hover svg {
+  transform: translateX(-2px);
+}
+
+.k-auth[dir='rtl'] .k-auth-home:hover svg {
+  transform: scaleX(-1) translateX(-2px);
+}
+
+/* --------------------------------------------------------------------------
+   Heading block
+   -------------------------------------------------------------------------- */
+
+.k-auth-head {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--spacing-1);
-  padding: var(--spacing-1);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  background: var(--color-surface-elevated);
+  gap: 0.4rem;
+  margin-bottom: 1.75rem;
 }
 
-.auth-tab {
-  min-height: 40px;
+.k-auth-title {
+  font-size: clamp(1.6rem, 2.2vw, 1.9rem);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+  color: var(--k-text);
+}
+
+.k-auth-sub {
+  color: var(--k-muted);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+/* --------------------------------------------------------------------------
+   Form
+   -------------------------------------------------------------------------- */
+
+.k-auth-form {
+  display: grid;
+  gap: 1.1rem;
+}
+
+.k-auth-field {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.k-auth-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--k-text-soft);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* The label's trailing slot: "forgot password", or a field hint. It is a
+   sibling of the label text rather than a wrapper, so the input's accessible
+   name stays exactly the label string. */
+.k-auth-label-aside {
+  color: var(--k-faint);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.k-auth-label-aside a,
+.k-auth-label-aside button {
+  min-height: 24px;
+  padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--text-label);
-  font-weight: 700;
-  line-height: var(--text-label--line-height);
+  color: var(--k-muted);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 180ms var(--k-ease);
+}
+
+.k-auth-label-aside a:hover,
+.k-auth-label-aside button:hover {
+  color: var(--k-emerald);
+}
+
+/* The field itself. One control, one border, one focus ring -- the ring is a
+   box-shadow rather than an outline so it can sit inside the rounded corner
+   without a second shape. */
+.k-auth-input {
+  width: 100%;
+  min-height: 46px;
+  padding-inline: 0.875rem;
+  border: 1px solid var(--k-line-strong);
+  border-radius: 9px;
+  background: var(--k-surface);
+  color: var(--k-text);
+  font: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  transition:
+    border-color 180ms var(--k-ease),
+    background-color 180ms var(--k-ease),
+    box-shadow 180ms var(--k-ease);
+}
+
+.k-auth-input::placeholder {
+  color: var(--k-faint);
+}
+
+.k-auth-input:hover:not(:disabled) {
+  border-color: rgba(230, 242, 235, 0.28);
+}
+
+.k-auth-input:focus-visible {
+  outline: none;
+  border-color: var(--k-emerald-line);
+  background: var(--k-surface-2);
+  box-shadow: 0 0 0 3px var(--k-emerald-soft);
+}
+
+.k-auth-input:disabled {
+  color: var(--k-faint);
+  cursor: not-allowed;
+}
+
+/* Inherently LTR values stay LTR inside an RTL page. An email address or a
+   password is not Persian text, and letting the bidi algorithm reorder it
+   moves the cursor to the wrong end of the field. */
+.k-auth-input[dir='ltr'] {
+  text-align: start;
+}
+
+.k-auth[dir='rtl'] .k-auth-input[dir='ltr'] {
+  /* `start` in an RTL container is the right edge, which is where a Persian
+     reader expects the field to begin -- but the value itself must read
+     left-to-right, so the caret and glyph order follow `dir`, not the page. */
+  text-align: right;
+}
+
+.k-auth-input[aria-invalid='true'] {
+  border-color: var(--k-danger-line);
+}
+
+.k-auth-input[aria-invalid='true']:focus-visible {
+  border-color: var(--k-danger-line);
+  box-shadow: 0 0 0 3px var(--k-danger-soft);
+}
+
+/* Password row: the input and its visibility toggle share one bordered box,
+   so the toggle reads as part of the control rather than a button parked
+   beside it. */
+.k-auth-password {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.k-auth-password .k-auth-input {
+  padding-inline-end: 3rem;
+}
+
+.k-auth-reveal {
+  position: absolute;
+  inset-inline-end: 0.25rem;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--k-faint);
   cursor: pointer;
   transition:
-    background-color 0.15s var(--ease-out),
-    color 0.15s var(--ease-out);
+    color 180ms var(--k-ease),
+    background-color 180ms var(--k-ease);
 }
 
-.auth-tab:hover {
-  color: var(--color-text-primary);
+.k-auth-reveal:hover {
+  color: var(--k-text-soft);
+  background: rgba(255, 255, 255, 0.05);
 }
 
-.auth-tab[aria-pressed='true'] {
-  background: var(--color-surface);
-  color: var(--color-text-brand);
-  box-shadow: var(--shadow-card);
+.k-auth-reveal:focus-visible {
+  outline: 2px solid var(--k-focus);
+  outline-offset: 1px;
 }
 
-.auth-form {
+/* --------------------------------------------------------------------------
+   Password strength
+
+   Four segments rather than a continuous bar: a bar implies a measurement the
+   server does not make. The segments fill in sequence and the label names the
+   level, so the reading is "this is weak", not "this is 37%".
+   -------------------------------------------------------------------------- */
+
+.k-auth-strength {
   display: grid;
-  gap: var(--spacing-3);
-  margin-top: var(--spacing-4);
+  gap: 0.35rem;
+  /* Clears the input's border so the segments read as a separate reading
+     rather than as a second edge on the field. */
+  margin-top: 0.4rem;
 }
 
-.auth-field {
+.k-auth-strength-bars {
   display: grid;
-  gap: var(--spacing-1);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.k-auth-strength-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--k-line);
+  transition: background-color 240ms var(--k-ease);
+}
+
+.k-auth-strength[data-level='1'] .k-auth-strength-bar:nth-child(-n + 1),
+.k-auth-strength[data-level='2'] .k-auth-strength-bar:nth-child(-n + 2),
+.k-auth-strength[data-level='3'] .k-auth-strength-bar:nth-child(-n + 3),
+.k-auth-strength[data-level='4'] .k-auth-strength-bar:nth-child(-n + 4) {
+  background: var(--k-emerald);
+}
+
+.k-auth-strength[data-level='1'] .k-auth-strength-bar:nth-child(-n + 1) {
+  background: var(--k-danger);
+}
+
+.k-auth-strength[data-level='2'] .k-auth-strength-bar:nth-child(-n + 2) {
+  background: var(--k-warn);
+}
+
+.k-auth-strength-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--k-faint);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.k-auth-strength-value {
+  font-weight: 600;
+  color: var(--k-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Errors and notices
+
+   The error is announced (`role="alert"`) and is tied to the field it belongs
+   to through `aria-describedby`, so a screen reader hears it in context
+   rather than as a floating sentence.
+   -------------------------------------------------------------------------- */
+
+.k-auth-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--k-danger-line);
+  border-radius: 9px;
+  background: var(--k-danger-soft);
+  color: var(--k-danger);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.k-auth-error svg {
+  flex: none;
+  margin-top: 0.1rem;
+}
+
+.k-auth-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--k-emerald-line);
+  border-radius: 9px;
+  background: var(--k-emerald-soft);
+  color: var(--k-emerald-bright);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.k-auth-notice svg {
+  flex: none;
+  margin-top: 0.1rem;
+}
+
+/* A field-level message sits under its own input, smaller than the banner. */
+.k-auth-field-error {
+  color: var(--k-danger);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+   Primary action
+
+   Emerald with the dark on-primary ink -- never white on emerald, which
+   measures about 2.1:1 and is the single most common contrast failure on a
+   green button. The loading state keeps the button's width by swapping the
+   label for a spinner in place rather than collapsing to a shorter word.
+   -------------------------------------------------------------------------- */
+
+.k-auth-submit {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 48px;
+  margin-top: 0.35rem;
+  padding-inline: 1.25rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--k-emerald);
+  color: var(--k-emerald-ink);
+  font-size: 0.9375rem;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 10px 26px -14px rgba(0, 199, 129, 0.6);
+  transition:
+    background-color 180ms var(--k-ease),
+    transform 140ms var(--k-ease),
+    box-shadow 180ms var(--k-ease);
+}
+
+.k-auth-submit:hover:not(:disabled) {
+  background: var(--k-emerald-bright);
+}
+
+.k-auth-submit:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 6px 16px -12px rgba(0, 199, 129, 0.5);
+}
+
+.k-auth-submit:focus-visible {
+  outline: 2px solid var(--k-focus);
+  outline-offset: 2px;
+}
+
+.k-auth-submit:disabled {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.k-auth-submit[data-busy='true'] {
+  cursor: progress;
+}
+
+.k-auth-spinner {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border: 2px solid rgba(3, 33, 23, 0.28);
+  border-top-color: var(--k-emerald-ink);
+  border-radius: 50%;
+  animation: k-auth-spin 640ms linear infinite;
+}
+
+@keyframes k-auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Secondary action (OAuth, or the quiet alternative)
+   -------------------------------------------------------------------------- */
+
+.k-auth-divider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  margin-block: 1.25rem;
+  color: var(--k-faint);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.k-auth-divider::before,
+.k-auth-divider::after {
+  content: '';
+  height: 1px;
+  background: var(--k-line);
+}
+
+.k-auth-oauth {
+  display: grid;
+  gap: 0.6rem;
+}
+
+@media (min-width: 26rem) {
+  .k-auth-oauth[data-count='2'] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.k-auth-oauth-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 46px;
+  padding-inline: 0.9rem;
+  border: 1px solid var(--k-line-strong);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--k-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    background-color 180ms var(--k-ease),
+    border-color 180ms var(--k-ease),
+    transform 140ms var(--k-ease);
+}
+
+.k-auth-oauth-btn:hover:not(:disabled) {
+  border-color: rgba(230, 242, 235, 0.32);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.k-auth-oauth-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.k-auth-oauth-btn:focus-visible {
+  outline: 2px solid var(--k-focus);
+  outline-offset: 2px;
+}
+
+.k-auth-oauth-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.k-auth-oauth-btn svg {
+  flex: none;
+}
+
+/* --------------------------------------------------------------------------
+   Footer of the form: the switch link, the terms line, the way home
+   -------------------------------------------------------------------------- */
+
+.k-auth-alt {
+  margin-top: 1.5rem;
+  color: var(--k-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.k-auth-alt button,
+.k-auth-alt a {
+  min-height: 44px;
+  padding-inline: 0.25rem;
+  border: 0;
+  background: transparent;
+  color: var(--k-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 180ms var(--k-ease);
+}
+
+.k-auth-alt button:hover,
+.k-auth-alt a:hover {
+  color: var(--k-emerald);
+}
+
+.k-auth-terms {
+  margin-top: 1.1rem;
+  color: var(--k-faint);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   Back link for the recovery flow
+   -------------------------------------------------------------------------- */
+
+.k-auth-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  margin-top: 1.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--k-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 180ms var(--k-ease);
+}
+
+.k-auth-back:hover {
+  color: var(--k-text);
+}
+
+/* --------------------------------------------------------------------------
+   Session panel (already signed in)
+
+   Reached by landing on /login with a live cookie. It is not a form, so it
+   does not look like one: a status row, the account, and the way forward.
+   -------------------------------------------------------------------------- */
+
+.k-auth-session {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.k-auth-session-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem;
+  border: 1px solid var(--k-line);
+  border-radius: 10px;
+  background: var(--k-surface);
+}
+
+.k-auth-session-who {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
-.auth-password-row {
+.k-auth-session-name {
+  color: var(--k-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.k-auth-session-email {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--k-muted);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.k-auth-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding-inline: 1rem;
+  border: 1px solid var(--k-line-strong);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--k-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 180ms var(--k-ease),
+    border-color 180ms var(--k-ease);
+}
+
+.k-auth-btn-secondary:hover:not(:disabled) {
+  border-color: rgba(230, 242, 235, 0.32);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.k-auth-btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Entrance
+
+   One stagger, driven by `--i` on each block. The animation is a short rise
+   and a fade, capped at 420ms total, and it runs once on mount. Elements are
+   visible by default and only the animation moves them, so a browser that
+   drops the animation (or a user who asked for less motion) still sees the
+   full form -- nothing is hidden waiting for a keyframe that may not come.
+   -------------------------------------------------------------------------- */
+
+@keyframes k-auth-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.k-auth-enter {
+  animation: k-auth-rise 420ms var(--k-ease) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+/* --------------------------------------------------------------------------
+   Reduced motion
+
+   Every transition and the entrance are removed, not shortened to something
+   imperceptible: a 0.01ms transition still runs, and on a low-powered device
+   a hundred of them are still work. State changes remain -- colour, border,
+   the strength bars -- they simply arrive at once.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .k-auth,
+  .k-auth *,
+  .k-auth *::before,
+  .k-auth *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .k-auth-enter {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .k-auth-spinner {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* ==========================================================================
+   THE CARD — 3D stage, traveling border light, ambient field
+
+   This block is the authentication surface's centre of gravity. Everything
+   above it is the form's content; everything here is the room the form sits
+   in, and the reason the page reads as the landing page's next step rather
+   than a settings dialog with a logo on it.
+
+   THE PIECES
+   ----------
+   .k-auth-stage     supplies `perspective`. The tilt must happen on a child of
+                     a perspective container, or `rotateY` is a flat skew.
+   .k-auth-card      the rotating surface. Two custom properties, --tilt-x and
+                     --tilt-y, are written by `useCardTilt`; the transform here
+                     composes them. Nothing else writes `transform`.
+   .k-auth-card-light the beams. Four spans, each on its own edge, each on its
+                     own keyframe delay, so the light runs around the border in
+                     one continuous circuit rather than four separate pulses.
+   .k-auth-ambient   the field behind the card: the landing page's hairline grid
+                     plus two emerald pools at the same intensity the hero uses.
+
+   WHY THE BEAMS ARE SPANS AND NOT ::before
+   ----------------------------------------
+   A pseudo-element is one element. The reference effect is four beams with
+   four independent timings that overlap at the corners; that is four elements
+   or a single conic-gradient with a rotating mask. The spans are simpler to
+   reason about, they can be given different colours per edge, and they degrade
+   to nothing under `forced-colors` without a mask that some browsers ignore.
+
+   THE TRANSFORM IS ONE DECLARATION
+   --------------------------------
+   `--tilt-x`/`--tilt-y` default to 0deg via `@property`, so the resting state
+   is a valid transform rather than an invalid one. Without the @property
+   registration the custom property is an unparsed token and the whole
+   `transform` declaration is dropped until the first pointermove — which is
+   the classic "the card is not tilted at rest, then jumps" bug.
+   ========================================================================== */
+
+@property --tilt-x {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@property --tilt-y {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* Card-scoped roles. Declared here rather than in `ink.css` because they are
+   the card's own geometry, not the palette: the colours below all resolve to
+   `--k-*` roles, so the emerald is still defined exactly once. */
+.k-auth {
+  --k-card-radius: 18px;
+  --k-card-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --k-card-tilt-duration: 420ms;
+  --k-card-beam-duration: 6.4s;
+}
+
+/* --------------------------------------------------------------------------
+   Stage
+   -------------------------------------------------------------------------- */
+
+.k-auth-stage {
+  position: relative;
+  /* The perspective is on the stage, and the card is its child. 1200px is a
+     long lens: enough depth to feel three-dimensional, not so short that the
+     far edge of the card shrinks visibly and the text goes soft. */
+  perspective: 1200px;
+  perspective-origin: 50% 40%;
+  /* The card is the only thing in flow here; the ambient field is absolute. */
+  isolation: isolate;
+}
+
+/* --------------------------------------------------------------------------
+   Ambient field
+   -------------------------------------------------------------------------- */
+
+.k-auth-ambient {
+  position: absolute;
+  /* Bleeds past the card so the pools are not clipped into a rectangle. */
+  inset: -8rem -6rem;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.k-auth-ambient-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--k-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--k-line) 1px, transparent 1px);
+  /* The same 4.5rem pitch as `.k-auth-brand-grid`, so the two halves of the
+     page are drawn on one grid. */
+  background-size: 4.5rem 4.5rem;
+  mask-image: radial-gradient(70% 60% at 50% 42%, #000 0%, transparent 100%);
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 42%, #000 0%, transparent 100%);
+  opacity: 0.4;
+}
+
+.k-auth-ambient-pool {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(28px);
+  will-change: transform;
+}
+
+/* The warm pool behind the card's top edge. This is the landing hero's glow
+   (`rgba(0, 199, 129, 0.13)`) at a lower intensity, because here it is behind
+   a form rather than behind a headline. */
+.k-auth-ambient-pool-a {
+  top: -4rem;
+  inset-inline-start: -2rem;
+  width: 34rem;
+  height: 26rem;
+  background: radial-gradient(closest-side, rgba(0, 199, 129, 0.16), transparent 72%);
+  animation: k-auth-drift-a 26s var(--k-card-ease) infinite alternate;
+}
+
+/* The cooler counter-pool, using the bright emerald the brand half already
+   uses for its second gradient stop. */
+.k-auth-ambient-pool-b {
+  bottom: -6rem;
+  inset-inline-end: -3rem;
+  width: 30rem;
+  height: 24rem;
+  background: radial-gradient(closest-side, rgba(67, 232, 171, 0.1), transparent 72%);
+  animation: k-auth-drift-b 32s var(--k-card-ease) infinite alternate;
+}
+
+@keyframes k-auth-drift-a {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2.5rem, 1.5rem, 0) scale(1.08);
+  }
+}
+
+@keyframes k-auth-drift-b {
+  from {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  to {
+    transform: translate3d(-2rem, -1.75rem, 0) scale(1);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Card
+   -------------------------------------------------------------------------- */
+
+.k-auth-card {
+  position: relative;
+  z-index: 1;
+  border-radius: var(--k-card-radius);
+  /* The surface is a lifted ink, one step above the page, so the card reads as
+     an object on the room rather than a hole in it. */
+  background:
+    radial-gradient(120% 90% at 50% -10%, rgba(0, 199, 129, 0.05), transparent 60%),
+    linear-gradient(180deg, var(--k-surface-2), var(--k-surface));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.045) inset,
+    0 40px 90px -50px rgba(0, 0, 0, 0.95),
+    0 0 0 1px var(--k-line);
+  transform-style: preserve-3d;
+  transform:
+    rotateX(var(--tilt-x))
+    rotateY(var(--tilt-y))
+    translateZ(0);
+  transition:
+    transform var(--k-card-tilt-duration) var(--k-card-ease),
+    box-shadow 320ms var(--k-card-ease);
+  will-change: transform;
+}
+
+/* While the pointer is inside, the transform must track the pointer rather
+   than ease toward it, or the card lags a frame behind the cursor and feels
+   heavy. The hook sets `data-tilting` for exactly that window; the return to
+   rest is the transition above, which is what makes the card settle instead of
+   snapping when the pointer leaves. */
+.k-auth-card[data-tilting='true'] {
+  transition:
+    transform 90ms linear,
+    box-shadow 320ms var(--k-card-ease);
+}
+
+/* The glow. It is a separate layer under the card so it can be lit by the
+   beams without tinting the content, and it lifts on hover. */
+.k-auth-card::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: radial-gradient(
+    60% 50% at 50% 0%,
+    rgba(0, 199, 129, 0.22),
+    transparent 70%
+  );
+  opacity: 0;
+  filter: blur(18px);
+  transition: opacity 420ms var(--k-card-ease);
+  pointer-events: none;
+}
+
+.k-auth-card:hover::after,
+.k-auth-card:focus-within::after {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   Border light
+   -------------------------------------------------------------------------- */
+
+.k-auth-card-light {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  /* The beams are clipped to the card's rounded rectangle. `overflow: hidden`
+     alone would clip the glow that sits outside the border, so the clipping
+     happens on this layer and the glow lives on the card's ::after. */
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The static hairline. Present always, so the card has an edge even when every
+   animation is off. */
+.k-auth-card-edge {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid var(--k-line-strong);
+}
+
+/* A beam: a short gradient strip on one edge. The keyframes move it along that
+   edge and fade it at both ends, so it appears to enter at a corner and leave
+   at the next one. */
+.k-auth-card-beam {
+  position: absolute;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--k-emerald) 45%,
+    var(--k-emerald-bright) 55%,
+    transparent
+  );
+  filter: blur(0.5px);
+  animation: var(--k-card-beam-duration) linear infinite;
+}
+
+/* Top and bottom run horizontally; left and right are the same strip rotated,
+   which keeps one gradient definition rather than four. */
+.k-auth-card-beam[data-edge='top'],
+.k-auth-card-beam[data-edge='bottom'] {
+  inset-inline: 0;
+  height: 1.5px;
+}
+
+.k-auth-card-beam[data-edge='top'] {
+  top: 0;
+  animation-name: k-auth-beam-x;
+}
+
+.k-auth-card-beam[data-edge='bottom'] {
+  bottom: 0;
+  animation-name: k-auth-beam-x-reverse;
+}
+
+.k-auth-card-beam[data-edge='left'],
+.k-auth-card-beam[data-edge='right'] {
+  inset-block: 0;
+  width: 1.5px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--k-emerald) 45%,
+    var(--k-emerald-bright) 55%,
+    transparent
+  );
+}
+
+.k-auth-card-beam[data-edge='right'] {
+  inset-inline-end: 0;
+  animation-name: k-auth-beam-y;
+}
+
+.k-auth-card-beam[data-edge='left'] {
+  inset-inline-start: 0;
+  animation-name: k-auth-beam-y-reverse;
+}
+
+/* The circuit: each edge is delayed by a quarter of the cycle, so the light
+   leaves one corner as it arrives at the next. The 6.4s cycle with a 1.6s
+   quarter is slow enough to read as ambient rather than as a loading bar. */
+.k-auth-card-beam[data-edge='top'] {
+  animation-delay: 0s;
+}
+
+.k-auth-card-beam[data-edge='right'] {
+  animation-delay: 1.6s;
+}
+
+.k-auth-card-beam[data-edge='bottom'] {
+  animation-delay: 3.2s;
+}
+
+.k-auth-card-beam[data-edge='left'] {
+  animation-delay: 4.8s;
+}
+
+/* Each beam is visible for a little over a quarter of the cycle and dark for
+   the rest, which is what makes it a traveling light rather than four edges
+   that are always lit. The window is 3%..28% against a 25% stagger, so
+   consecutive beams overlap by 3% (about 190ms) and the corner is never dark:
+   the light hands off at the corner instead of dying there and restarting.
+   The 3% ramp-in and 22%..28% hold give a soft head and a soft tail. */
+@keyframes k-auth-beam-x {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  3% {
+    opacity: 1;
+  }
+  22% {
+    transform: translateX(100%);
+    opacity: 1;
+  }
+  28%,
+  100% {
+    transform: translateX(103%);
+    opacity: 0;
+  }
+}
+
+@keyframes k-auth-beam-x-reverse {
+  0% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  3% {
+    opacity: 1;
+  }
+  22% {
+    transform: translateX(-100%);
+    opacity: 1;
+  }
+  28%,
+  100% {
+    transform: translateX(-103%);
+    opacity: 0;
+  }
+}
+
+@keyframes k-auth-beam-y {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  3% {
+    opacity: 1;
+  }
+  22% {
+    transform: translateY(100%);
+    opacity: 1;
+  }
+  28%,
+  100% {
+    transform: translateY(103%);
+    opacity: 0;
+  }
+}
+
+@keyframes k-auth-beam-y-reverse {
+  0% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  3% {
+    opacity: 1;
+  }
+  22% {
+    transform: translateY(-100%);
+    opacity: 1;
+  }
+  28%,
+  100% {
+    transform: translateY(-103%);
+    opacity: 0;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Card body
+   -------------------------------------------------------------------------- */
+
+.k-auth-card-body {
+  position: relative;
+  z-index: 1;
+  padding: clamp(1.5rem, 3.4vw, 2.25rem);
+  /* The body is the height-animated element (see `useAnimatedHeight`), so it
+     must not carry a border of its own that would jump with the height. */
+  border-radius: inherit;
+}
+
+/* --------------------------------------------------------------------------
+   Reduced motion: the card stops moving, the light stops traveling
+
+   The beams are not removed entirely -- the static hairline edge remains, so
+   the card still has a lit border -- but every animation is off. The ambient
+   pools stop drifting. The tilt never starts, because `useCardTilt` bails out
+   before attaching its listener.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .k-auth-ambient-pool {
+    animation: none !important;
+  }
+
+  .k-auth-card-beam {
+    animation: none !important;
+    opacity: 0 !important;
+  }
+
+  .k-auth-card {
+    transform: none !important;
+    transition: none !important;
+  }
+
+  .k-auth-card::after {
+    transition: none !important;
+  }
+}
+
+/* Forced colours: the beams are decorative light on a dark surface and become
+   invisible noise in a high-contrast theme, so they go. The border stays,
+   because it is the card's actual edge. */
+@media (forced-colors: active) {
+  .k-auth-card-beam,
+  .k-auth-card::after,
+  .k-auth-ambient {
+    display: none !important;
+  }
+
+  .k-auth-card {
+    border: 1px solid CanvasText;
+    box-shadow: none;
+  }
+}
+
+/* ==========================================================================
+   CARD CONTENT — brand, heading, body crossfade
+
+   The card's inside is the old form, unchanged in behaviour, re-laid out for a
+   single centred surface. The one new motion is the body crossfade: the card
+   itself persists across login/signup and only its contents swap, which is
+   what makes the two modes read as one card in two states.
+   ========================================================================== */
+
+.k-auth-card-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.9rem;
+}
+
+.k-auth-card-brand img {
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+
+.k-auth-card-word {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.16em;
+  color: var(--k-text);
+}
+
+/* The heading block inside the card. Tighter than the old panel's, because the
+   card's own padding already separates it from the edge. */
+.k-auth-card .k-auth-head {
+  margin-bottom: 1.35rem;
+}
+
+.k-auth-card .k-auth-title {
+  font-size: clamp(1.5rem, 2.4vw, 1.75rem);
+}
+
+/* The body. Keyed on the card's state in `AuthPage`, so React replaces the
+   subtree and this animation runs once per state change -- the "fields enter
+   and leave" half of the login/signup transition. */
+.k-auth-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--spacing-2);
-  align-items: end;
+  gap: 1.1rem;
+  animation: k-auth-body-in 340ms var(--k-card-ease) both;
+}
+
+@keyframes k-auth-body-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.k-auth-alt-tight {
+  margin-top: 0.25rem;
+}
+
+/* The session panel's inline submit: a link styled as the primary button, so
+   it keeps the button's width rule unless told otherwise. */
+.k-auth-submit-inline {
+  width: auto;
+  margin-top: 0;
+  text-decoration: none;
+}
+
+.k-auth-label-block {
+  margin-bottom: 0.5rem;
+}
+
+.k-auth-session-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.k-auth-session-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--k-line);
+  border-radius: 8px;
+}
+
+.k-auth-session-id {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--k-muted);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-auth-session-current {
+  font-size: 0.75rem;
+  color: var(--k-emerald);
+}
+
+.k-auth-btn-compact {
+  min-height: 32px;
+  padding-inline: 0.6rem;
+  font-size: 0.75rem;
+}
+
+.k-auth-revoke-all {
+  margin-top: 0.6rem;
+}
+
+/* --------------------------------------------------------------------------
+   Narrow screens
+
+   The card keeps its light and its glow; it loses the tilt (the hook already
+   refuses a coarse pointer) and it stops bleeding past the viewport. The
+   ambient field is inset rather than removed, so the card is still lit.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 30rem) {
+  .k-auth-card-body {
+    padding: 1.35rem 1.15rem 1.5rem;
+  }
+
+  .k-auth-ambient {
+    inset: -4rem -2rem;
+  }
+
+  .k-auth-ambient-pool-a {
+    width: 24rem;
+    height: 20rem;
+  }
+
+  .k-auth-ambient-pool-b {
+    width: 22rem;
+    height: 18rem;
+  }
+}
+
+/* A phone in landscape, or a short window: the card must not be centred in a
+   viewport shorter than itself, or the top of it is unreachable. */
+@media (max-height: 40rem) {
+  .k-auth-page {
+    justify-content: flex-start;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Reduced motion for the card content
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .k-auth-body {
+    animation: none !important;
+  }
 }

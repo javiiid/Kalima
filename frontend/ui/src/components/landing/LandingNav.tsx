@@ -88,11 +88,19 @@ export function LandingNav({ t, loggedIn, primaryHref, primaryLabel, sections }:
             <LandingLanguageSwitch t={t} />
             {loggedIn ? null : (
               <Link to="/login" className="k-nav-signin">
-                {t('landing.nav.login')}
+                {/*
+                  The label is duplicated as a `data-label` attribute rather than
+                  a second DOM node: `::after` paints the emerald copy that wipes
+                  in over it, so the accessible name stays one clean string and
+                  nothing is announced twice.
+                */}
+                <span className="k-nav-signin-label" data-label={t('landing.nav.login')}>
+                  {t('landing.nav.login')}
+                </span>
               </Link>
             )}
             <Link to={primaryHref} className="k-btn k-btn-primary k-nav-cta">
-              {primaryLabel}
+              <span className="k-nav-cta-label">{primaryLabel}</span>
             </Link>
             <button
               type="button"
@@ -142,7 +150,7 @@ export function LandingNav({ t, loggedIn, primaryHref, primaryLabel, sections }:
             navigation, and language is navigation on this page.
           */}
           <div className="k-mobile-lang">
-            <LandingLanguageSwitch t={t} />
+            <LandingLanguageSwitch t={t} inline />
           </div>
           <p className="k-mobile-note">{t('landing.cta.note')}</p>
         </div>

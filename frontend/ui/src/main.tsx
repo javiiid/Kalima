@@ -17,6 +17,9 @@ import './styles/fonts-latin.css'
 // Geist, for the landing page only. Its own file so the app's Manrope face and
 // the generated Vazirmatn faces stay untouched (see fonts-landing.css).
 import './styles/fonts-landing.css'
+// The ink/emerald roles for the public surfaces (landing + auth). Declared
+// before tokens.css so the custom properties exist before anything reads them.
+import './styles/ink.css'
 import './styles/tokens.css'
 import './styles/ui.css'
 

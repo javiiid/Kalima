@@ -639,10 +639,10 @@ export const fa = {
   // ---- auth (local password account) ----
   'auth.loginTab': 'ورود',
   'auth.signupTab': 'ثبت‌نام',
-  'auth.loginTitle': 'ورود به کالیما',
-  'auth.signupTitle': 'ساخت حساب کالیما',
-  'auth.loginSub': 'با حساب کالیمای خود وارد شوید.',
-  'auth.signupSub': 'یک حساب کالیما بسازید. گذرواژه فقط به‌صورت هش ذخیره می‌شود.',
+  'auth.loginTitle': 'خوش برگشتید.',
+  'auth.signupTitle': 'حساب کالیما بسازید.',
+  'auth.loginSub': 'برای ادامهٔ مسیرتان با کالیما وارد شوید.',
+  'auth.signupSub': 'دنیایی بدون مرزهای زبانی را آغاز کنید.',
   'auth.email': 'ایمیل',
   'auth.emailPh': 'you@example.com',
   'auth.password': 'گذرواژه',
@@ -653,8 +653,8 @@ export const fa = {
   'auth.submitLogin': 'ورود',
   'auth.submitSignup': 'ساخت حساب',
   'auth.sending': 'در حال ارسال…',
-  'auth.haveAccount': 'حساب دارید؟ وارد شوید',
-  'auth.noAccount': 'حساب ندارید؟ ثبت‌نام کنید',
+  'auth.haveAccount': 'حساب دارید؟',
+  'auth.noAccount': 'تازه‌وارد کالیما هستید؟',
   'auth.badEmail': 'نشانی ایمیل معتبر نیست.',
   'auth.badPassword': 'گذرواژه باید حداقل ۸ نویسه باشد.',
   'auth.badName': 'نام نمایشی لازم است.',
@@ -687,6 +687,44 @@ export const fa = {
   'auth.newPassword': 'گذرواژه جدید',
   'auth.changeSubmit': 'تغییر گذرواژه',
   'auth.changed': 'گذرواژه عوض شد. دستگاه‌های دیگر خارج شدند.',
+
+  // ---- auth: brand panel (the ink half of the split screen) ----
+  'auth.brandEyebrow': 'ترجمهٔ ادبی، با وسواس',
+  'auth.brandLine': 'کتاب‌ها را با ساختار، لحن و تایپوگرافی ترجمه می‌کنیم — نه تکه‌تکه.',
+  'auth.brandPoint1': 'ساختار کتاب حفظ می‌شود',
+  'auth.brandPoint2': 'واژه‌نامه در سراسر کتاب یکدست می‌ماند',
+  'auth.brandPoint3': 'نسخهٔ خواندنی، نه فایل تبدیل‌شده',
+  'auth.brandFoot': 'هر کتاب. هر زبان. هیچ‌چیز از دست نمی‌رود.',
+
+  // ---- auth: password recovery (backend supports both steps) ----
+  'auth.forgotPassword': 'گذرواژه را فراموش کرده‌اید؟',
+  'auth.resetTitle': 'بازیابی گذرواژه',
+  'auth.resetSub': 'نشانی ایمیلتان را بنویسید؛ یک کد ۶رقمی می‌فرستیم.',
+  'auth.resetSend': 'ارسال کد بازیابی',
+  'auth.resetSent': 'اگر این نشانی ثبت شده باشد، کد بازیابی فرستاده شد. ۱۵ دقیقه اعتبار دارد.',
+  'auth.resetCode': 'کد بازیابی',
+  'auth.resetCodePh': '۱۲۳۴۵۶',
+  'auth.resetConfirm': 'تعیین گذرواژهٔ تازه',
+  'auth.resetDone': 'گذرواژه عوض شد. با گذرواژهٔ تازه وارد شوید.',
+  'auth.resetBack': 'بازگشت به ورود',
+  'auth.resetBadCode': 'کد باید ۶ رقم باشد.',
+  'auth.resetFailed': 'کد درست نیست یا منقضی شده است.',
+
+  // ---- auth: signup password experience ----
+  'auth.confirmPassword': 'تکرار گذرواژه',
+  'auth.mismatch': 'دو گذرواژه یکسان نیستند.',
+  'auth.passwordHint': 'دست‌کم ۸ نویسه.',
+  'auth.strengthLabel': 'قدرت گذرواژه',
+  'auth.strength.weak': 'ضعیف',
+  'auth.strength.fair': 'متوسط',
+  'auth.strength.good': 'خوب',
+  'auth.strength.strong': 'قوی',
+  'auth.termsNote': 'با ساخت حساب، شرایط استفاده و سیاست حریم خصوصی کالیما را می‌پذیرید.',
+
+  // ---- auth: shared chrome ----
+  'auth.backHome': 'بازگشت به صفحهٔ اصلی',
+  'auth.checking': 'در حال بررسی…',
+  'auth.emailHint': 'نشانی‌ای که با آن وارد می‌شوید.',
 
   // ---- monitor (job detail page) ----
   'monitor.title': 'پایش ترجمه',

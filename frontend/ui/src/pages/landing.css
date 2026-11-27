@@ -2,10 +2,10 @@
    KALIMA — landing page
 
    The landing is a fixed ink surface regardless of the app theme: its job is
-   to present the product, not to be a second dashboard. The palette therefore
-   lives here, scoped to .k-landing, instead of changing the app tokens that
-   every internal page depends on. Components never carry a colour literal;
-   they use these --k-* roles (and the reader's own --color-* theme scopes).
+   to present the product, not to be a second dashboard. Its palette therefore
+   cannot ride on the app tokens every internal page depends on -- it uses the
+   --k-* roles, which are declared once in `styles/ink.css` and shared with the
+   auth pages. Components never carry a colour literal.
 
    The landing also owns its own display scale: the app's 12px caption floor
    still applies, but the marketing page needs large editorial type and a wider
@@ -13,41 +13,9 @@
    ========================================================================== */
 
 .k-landing {
-  --k-ink: #060807;
-  --k-ink-2: #090c0a;
-  --k-surface: #0f1412;
-  --k-surface-2: #141a17;
-  --k-surface-3: #1a221e;
-  --k-line: rgba(230, 242, 235, 0.1);
-  --k-line-strong: rgba(230, 242, 235, 0.18);
-  --k-text: #f1f5f2;
-  --k-text-soft: #c8d0cb;
-  --k-muted: #9ba7a0;
-  --k-faint: #7f8c85;
-  --k-emerald: #00c781;
-  --k-emerald-bright: #43e8ab;
-  --k-emerald-ink: #032117;
-  --k-emerald-soft: rgba(0, 199, 129, 0.12);
-  --k-emerald-line: rgba(0, 199, 129, 0.34);
-  --k-warn: #e5bd72;
-  --k-paper: #f2efe6;
-  --k-paper-2: #e9e5da;
-  --k-paper-line: rgba(14, 24, 18, 0.14);
-  --k-paper-text: #0b1711;
-  --k-paper-muted: #4e5d55;
-  --k-paper-emerald: #076a48;
-  --k-focus: #7dffd0;
-  --k-focus-paper: #045f3f;
-  /* Geist for Latin, Vazirmatn for Persian. Geist has no Arabic-script
-     coverage, so it must never win an RTL run -- Vazirmatn is second here and
-     first in --k-font-fa, which every RTL sample opts into explicitly. */
-  --k-font: 'Geist', 'Vazirmatn', system-ui, -apple-system, sans-serif;
-  --k-font-fa: 'Vazirmatn', 'Geist', system-ui, -apple-system, sans-serif;
-  --k-gutter: clamp(1.25rem, 4vw, 3rem);
-  --k-max: 1200px;
-  --k-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --k-radius: 14px;
-
+  /* The ink/emerald roles live in `styles/ink.css`, shared with the auth
+     pages so there is one definition of the palette rather than two copies
+     that drift. This file owns layout and nothing else. */
   position: relative;
   isolation: isolate;
   min-height: 100dvh;
@@ -62,13 +30,6 @@
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-}
-
-/* Prevent the browser's light canvas from flashing behind the dark page on
-   overscroll. Scoped to the landing being mounted, so internal pages keep
-   their own theme. */
-body:has(.k-landing) {
-  background: #060807;
 }
 
 .k-landing,
@@ -428,16 +389,22 @@ body:has(.k-landing) {
   font-weight: 550;
   line-height: 1.4;
   text-decoration: none;
-  transition: color 150ms var(--k-ease), background-color 150ms var(--k-ease);
+  transition:
+    color 150ms var(--k-ease),
+    background-color 150ms var(--k-ease);
 }
 
 .k-nav-link:hover {
   background: rgba(255, 255, 255, 0.04);
-  color: var(--k-text);
+  color: var(--k-emerald);
 }
 
 .k-nav-link[aria-current='location'] {
   color: var(--k-text);
+}
+
+.k-nav-link[aria-current='location']:hover {
+  color: var(--k-emerald);
 }
 
 .k-nav-link[aria-current='location']::after {
@@ -450,6 +417,104 @@ body:has(.k-landing) {
   background: var(--k-emerald);
 }
 
+/* --------------------------------------------------------------------------
+   Strikethrough nav hover
+
+   Hovering one link crosses out every *other* link with a quick diagonal pen
+   stroke, one after another; the hovered link stays clean and takes the
+   emerald. The stroke is `::before` because `::after` is already the active
+   section underline above.
+
+   The stroke is a rotated 1.5px rule scaled from 0 on the inline start, so it
+   reads as drawn rather than faded in. It is absolutely positioned, so nothing
+   reflows and the bar cannot shift while the animation runs.
+
+   Stagger is DOM order, not distance from the hovered link: it survives a
+   change to `SECTIONS` without a new rule per hover state, and in RTL the DOM
+   order is the visual right-to-left order, which is the order a Persian reader
+   scans. Only the delay changes per index; the effect itself is one rule.
+   -------------------------------------------------------------------------- */
+
+.k-nav-link::before {
+  content: '';
+  position: absolute;
+  inset-inline: 0.55rem;
+  top: 50%;
+  height: 1.5px;
+  margin-top: -0.75px;
+  border-radius: 1px;
+  background: var(--k-emerald);
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(-2.4deg) scaleX(0);
+  transform-origin: left center;
+  transition:
+    transform 280ms var(--k-ease),
+    opacity 140ms linear;
+}
+
+/* A pen starts at the inline start of the word, which is the right edge in
+   Persian, and the diagonal mirrors with it. `inset-inline` already mirrors the
+   stroke's extent; the origin and the angle are what need telling. */
+.k-landing[dir='rtl'] .k-nav-link::before {
+  transform: rotate(2.4deg) scaleX(0);
+  transform-origin: right center;
+}
+
+.k-landing[dir='rtl'] .k-nav-links:has(.k-nav-link:hover) .k-nav-link:not(:hover)::before,
+.k-landing[dir='rtl'] .k-nav-links:has(.k-nav-link:focus-visible) .k-nav-link:not(:focus-visible)::before {
+  transform: rotate(2.4deg) scaleX(1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  /* Every link except the one under the pointer. `:has()` on the container is
+     what lets a sibling react to another sibling's hover without JavaScript. */
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:not(:hover)::before {
+    opacity: 1;
+    transform: rotate(-2.4deg) scaleX(1);
+  }
+
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:not(:hover) {
+    color: var(--k-faint);
+  }
+
+  /* Sequential, 55ms apart. Written per index rather than with a custom
+     property so a link added to `SECTIONS` still animates, just at 0ms. */
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:nth-child(1)::before {
+    transition-delay: 0ms;
+  }
+
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:nth-child(2)::before {
+    transition-delay: 55ms;
+  }
+
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:nth-child(3)::before {
+    transition-delay: 110ms;
+  }
+
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:nth-child(4)::before {
+    transition-delay: 165ms;
+  }
+}
+
+/* Keyboard parity: focusing a link does what hovering it does, so tabbing
+   through the bar shows the same relationship the pointer shows. No stagger
+   here -- a keyboard user is moving deliberately and a queue of strokes would
+   only lag behind the focus ring. */
+.k-nav-links:has(.k-nav-link:focus-visible) .k-nav-link:not(:focus-visible)::before {
+  opacity: 1;
+  transform: rotate(-2.4deg) scaleX(1);
+  transition-delay: 0ms;
+}
+
+.k-nav-links:has(.k-nav-link:focus-visible) .k-nav-link:not(:focus-visible) {
+  color: var(--k-faint);
+}
+
+.k-nav-link:focus-visible {
+  color: var(--k-emerald);
+}
+
 .k-nav-actions {
   display: flex;
   align-items: center;
@@ -458,6 +523,7 @@ body:has(.k-landing) {
 }
 
 .k-nav-signin {
+  position: relative;
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -467,17 +533,156 @@ body:has(.k-landing) {
   font-weight: 550;
   text-decoration: none;
   white-space: nowrap;
-  transition: color 150ms var(--k-ease);
+  transition:
+    color 150ms var(--k-ease),
+    transform 120ms var(--k-ease);
 }
 
-.k-nav-signin:hover {
-  color: var(--k-text);
+/*
+  LOGIN — wipe reveal
+
+  Not a colour change: the emerald copy of the word is painted over the muted
+  one and clipped to nothing, then unclipped from the inline start, so the word
+  is *rewritten* left-to-right (right-to-left in Persian) rather than fading.
+  A hairline rule draws under it on the same curve, a beat behind.
+
+  The copy is `::after` with `content: attr(data-label)` instead of a second
+  span, so the link still reads as one word to a screen reader and there is no
+  duplicate text to keep in sync with the dictionary.
+*/
+.k-nav-signin-label {
+  position: relative;
+  display: inline-block;
 }
 
+.k-nav-signin-label::after {
+  content: attr(data-label);
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  color: var(--k-emerald);
+  clip-path: inset(0 100% 0 0);
+  pointer-events: none;
+  transition: clip-path 280ms var(--k-ease);
+}
+
+.k-landing[dir='rtl'] .k-nav-signin-label::after {
+  clip-path: inset(0 0 0 100%);
+}
+
+.k-nav-signin::before {
+  content: '';
+  position: absolute;
+  inset-inline: 0.35rem;
+  bottom: 9px;
+  height: 1px;
+  background: var(--k-emerald);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 300ms var(--k-ease) 40ms;
+}
+
+.k-landing[dir='rtl'] .k-nav-signin::before {
+  transform-origin: right center;
+}
+
+.k-nav-signin:hover .k-nav-signin-label::after,
+.k-nav-signin:focus-visible .k-nav-signin-label::after {
+  clip-path: inset(0 0 0 0);
+}
+
+.k-nav-signin:hover::before,
+.k-nav-signin:focus-visible::before {
+  transform: scaleX(1);
+}
+
+/* Pressed: a 1px settle, no scale -- a text link that shrinks reads as a
+   button, and this one deliberately is not one. */
+.k-nav-signin:active {
+  transform: translateY(1px);
+}
+
+/*
+  START TRANSLATING — the signature action
+
+  Three coordinated motions, all short:
+
+  1. A brighter emerald surface sweeps across the button from the inline start
+     (`scaleX` from a logical origin, so it mirrors in Persian). The leading
+     edge of the sweep carries a white sliver in the gradient, so the fill reads
+     as light passing over the surface rather than a background swap.
+  2. The label lifts 1px and settles -- enough to feel the button acknowledge
+     the pointer, not enough to move the bar.
+  3. On press the whole control compresses to 0.985 and drops 1px.
+
+  The base emerald never changes on hover; the sweep is the only colour event,
+  which is why the button stays one flat brand surface at rest.
+*/
 .k-nav-cta {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
   min-height: 42px;
   padding-inline: 0.95rem;
   font-size: 0.8125rem;
+}
+
+.k-nav-cta::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to right,
+    var(--k-emerald-bright) 0%,
+    var(--k-emerald-bright) 90%,
+    rgba(255, 255, 255, 0.55) 100%
+  );
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 340ms var(--k-ease);
+}
+
+.k-landing[dir='rtl'] .k-nav-cta::before {
+  background: linear-gradient(
+    to left,
+    var(--k-emerald-bright) 0%,
+    var(--k-emerald-bright) 90%,
+    rgba(255, 255, 255, 0.55) 100%
+  );
+  transform-origin: right center;
+}
+
+.k-nav-cta-label {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  transition: transform 260ms var(--k-ease);
+}
+
+.k-nav-cta:hover::before,
+.k-nav-cta:focus-visible::before {
+  transform: scaleX(1);
+}
+
+.k-nav-cta:hover .k-nav-cta-label,
+.k-nav-cta:focus-visible .k-nav-cta-label {
+  transform: translateY(-1px);
+}
+
+.k-nav-cta:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+/* Specificity: the generic `.k-landing .k-btn-primary:active` is (0,3,0) and
+   would otherwise win with a bare translate. */
+.k-landing .k-btn-primary.k-nav-cta:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+/* The generic primary hover would flood the button before the sweep lands, so
+   the CTA keeps its resting surface and lets the sweep do the work. */
+.k-landing .k-btn-primary.k-nav-cta:hover {
+  background: var(--k-emerald);
 }
 
 .k-menu-btn {
@@ -3507,6 +3712,75 @@ body:has(.k-landing) {
     opacity: 1 !important;
     transform: none !important;
   }
+
+  /* The nav strikethrough keeps its meaning under reduced motion -- the other
+     links are still marked -- but drops the pen sweep and the queue: the
+     strokes appear at once, at full length, with no delay. */
+  .k-nav-link::before {
+    transition: none !important;
+    transition-delay: 0ms !important;
+  }
+
+  .k-nav-links:has(.k-nav-link:hover) .k-nav-link:not(:hover)::before,
+  .k-nav-links:has(.k-nav-link:focus-visible) .k-nav-link:not(:focus-visible)::before {
+    transition-delay: 0ms !important;
+  }
+
+  /* Header micro-interactions keep their *state* under reduced motion and drop
+     the travel: the login word is simply emerald, the CTA surface is simply
+     brighter, the globe does not turn, and the language menu appears in place
+     instead of sliding. Nothing is lost, nothing moves. */
+  .k-nav-signin-label::after,
+  .k-nav-signin::before,
+  .k-nav-cta::before,
+  .k-nav-cta-label,
+  .k-lang-btn,
+  .k-lang-globe,
+  .k-lang-menu,
+  .k-lang-option,
+  .k-lang-option-tick {
+    transition: none !important;
+  }
+
+  .k-nav-signin:hover .k-nav-signin-label::after,
+  .k-nav-signin:focus-visible .k-nav-signin-label::after {
+    clip-path: none;
+  }
+
+  .k-nav-signin:hover::before,
+  .k-nav-signin:focus-visible::before {
+    transform: scaleX(1);
+  }
+
+  .k-nav-cta:hover .k-nav-cta-label,
+  .k-nav-cta:focus-visible .k-nav-cta-label {
+    transform: none;
+  }
+
+  .k-nav-cta:active,
+  .k-landing .k-btn-primary.k-nav-cta:active {
+    transform: none;
+  }
+
+  /* The menu's own entrance is the only thing dropped: it is still revealed
+     and hidden by `data-open`, so it appears and disappears instantly rather
+     than not at all. */
+  .k-lang-menu {
+    transform: none !important;
+  }
+
+  .k-lang[data-open='true'] .k-lang-menu {
+    transform: none !important;
+  }
+
+  .k-lang-btn:hover .k-lang-globe,
+  .k-lang[data-open='true'] .k-lang-globe {
+    transform: none;
+  }
+
+  .k-lang-option-tick {
+    transform: none;
+  }
 }
 
 /* ==========================================================================
@@ -4024,86 +4298,197 @@ body:has(.k-landing) {
 /* ==========================================================================
    LANGUAGE SWITCH
 
-   A two-segment control in the nav. The app's own chrome uses a single toggle
-   button that names the language you are *not* in; on the landing both options
-   are visible, because the page is about language and a visitor should be able
-   to see what is available without pressing anything first.
+   Closed: the globe alone. Open: a short list of language *names*, each in its
+   own script. It used to be a two-segment EN/FA toggle, which spent 80px of a
+   crowded bar on two ISO tags and showed no language name at all.
+
+   The menu is always in the DOM and toggled with `data-open`, so it can animate
+   out as well as in. `visibility` is what keeps it out of the tab order while
+   closed, and its transition delay is what lets the exit finish before the
+   element leaves the accessibility tree.
 
    It reads and writes the shared `useLanguage` context, so it cannot drift from
    the rest of the app: `setLang` is what persists the choice and what sets
    `<html lang>` / `<html dir>`.
    ========================================================================== */
 
-.k-lang-switch {
+.k-lang {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 1px;
-  padding: 2px;
+}
+
+/* The globe button. 44px square is the touch minimum and matches the menu
+   button beside it, so the two chrome controls read as one family. */
+.k-lang-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border: 1px solid var(--k-line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.025);
+  color: var(--k-muted);
+  cursor: pointer;
+  transition:
+    color 200ms var(--k-ease),
+    border-color 220ms var(--k-ease),
+    background-color 220ms var(--k-ease);
 }
 
-.k-lang-switch-icon {
-  flex: none;
-  margin-inline: 0.35rem 0.15rem;
-  color: var(--k-faint);
+.k-lang-btn:hover,
+.k-lang[data-open='true'] .k-lang-btn {
+  border-color: var(--k-emerald-line);
+  background: rgba(0, 199, 129, 0.06);
+  color: var(--k-emerald);
 }
 
-.k-lang-switch-btn {
-  display: inline-grid;
-  place-items: center;
-  min-width: 34px;
-  min-height: 32px;
-  padding: 0 0.4rem;
+/* A quarter turn on hover, and a full settle back when the menu opens. Not a
+   spin: a globe that never stops rotating stops meaning anything. */
+.k-lang-globe {
+  transition: transform 280ms var(--k-ease);
+}
+
+.k-lang-btn:hover .k-lang-globe {
+  transform: rotate(24deg);
+}
+
+.k-lang[data-open='true'] .k-lang-globe {
+  transform: rotate(-12deg);
+}
+
+/* The menu. Anchored to the inline end of the globe so it opens into the page
+   in both directions; `min-width` is the widest label plus its padding, so the
+   panel does not resize between the two languages. */
+.k-lang-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  inset-inline-end: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 10.5rem;
+  padding: 5px;
+  border: 1px solid var(--k-line-strong);
+  border-radius: 10px;
+  background: var(--k-surface-2);
+  box-shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.9);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px) scale(0.985);
+  transform-origin: top center;
+  transition:
+    opacity 160ms var(--k-ease),
+    transform 200ms var(--k-ease),
+    visibility 0s linear 200ms;
+}
+
+.k-landing[dir='rtl'] .k-lang-menu {
+  transform-origin: top center;
+}
+
+.k-lang[data-open='true'] .k-lang-menu {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 180ms var(--k-ease),
+    transform 240ms var(--k-ease),
+    visibility 0s;
+}
+
+/* One option. The name is the whole control; the tick is the active marker and
+   is decorative, because `aria-selected` already carries the state. */
+.k-lang-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 0.6rem;
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--k-muted);
-  font-size: 0.75rem;
-  font-weight: 650;
-  line-height: 1;
-  letter-spacing: 0.04em;
+  color: var(--k-text-soft);
+  font-family: var(--k-font);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.6;
+  text-align: start;
   cursor: pointer;
   transition:
     color 160ms var(--k-ease),
     background-color 160ms var(--k-ease);
 }
 
-.k-lang-switch-btn:hover {
+.k-lang-option:hover,
+.k-lang-option:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
   color: var(--k-text);
 }
 
-/* The active segment is emerald on ink, not emerald-filled: a filled pill here
-   would compete with the primary CTA sitting a few pixels away. */
-.k-lang-switch-btn[aria-pressed='true'] {
+/* The Persian option needs the Persian face and its own size, or "فارسی"
+   renders in Geist's fallback and looks like a different typeface from the
+   rest of the page. */
+.k-lang-option[lang='fa'] {
+  font-family: var(--k-font-fa);
+  font-size: 0.9375rem;
+  letter-spacing: 0;
+}
+
+/* The selected language is emerald on a soft emerald wash -- the same
+   treatment the app's own active nav items use, so the state reads as
+   "current", not as "hovered". */
+.k-lang-option[aria-selected='true'] {
   background: var(--k-emerald-soft);
   color: var(--k-emerald);
 }
 
-/* The Persian segment needs the Persian face, or "فا" renders in Geist's
-   fallback and looks like a different typeface from the rest of the page. */
-.k-lang-switch-btn[lang='fa'] {
-  font-family: var(--k-font-fa);
-  font-size: 0.8125rem;
-  letter-spacing: 0;
+.k-lang-option[aria-selected='true']:hover,
+.k-lang-option[aria-selected='true']:focus-visible {
+  background: rgba(0, 199, 129, 0.18);
+  color: var(--k-emerald);
 }
 
-/* On a phone the nav bar is tight: the globe goes and the segments stay, since
-   the switch is the one control a Persian speaker needs immediately. */
+.k-lang-option-tick {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0;
+  transform: scale(0.7);
+  transition:
+    opacity 160ms var(--k-ease),
+    transform 200ms var(--k-ease);
+}
+
+.k-lang-option-tick svg {
+  width: 14px;
+  height: 14px;
+}
+
+.k-lang-option[aria-selected='true'] .k-lang-option-tick {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* On a phone the globe stays -- it is the one control a Persian speaker needs
+   immediately, and the menu is a better use of a narrow bar than two segments
+   were. It only grows to the touch minimum. */
 @media (max-width: 48rem) {
-  /* Two classes, not one: `.k-landing svg { display: block }` is (0,1,1) and
-     would outrank a bare `.k-lang-switch-icon` (0,1,0), so the globe stayed
-     visible on a phone and pushed the segments off-centre. */
-  .k-lang-switch .k-lang-switch-icon {
-    display: none;
+  .k-lang-btn {
+    width: 44px;
+    height: 44px;
   }
 
-  /* 44px is the touch minimum and the rest of the landing nav already meets
-     it (`k-nav-link`, `k-menu-btn`). A 30px segment was the one control on the
-     page that a thumb could miss. */
-  .k-lang-switch-btn {
-    min-width: 44px;
+  .k-lang-menu {
+    min-width: 11.5rem;
+  }
+
+  .k-lang-option {
     min-height: 44px;
   }
 }
@@ -4115,7 +4500,21 @@ body:has(.k-landing) {
   margin-top: 1.5rem;
 }
 
-.k-mobile-lang .k-lang-switch-btn {
-  min-width: 44px;
-  min-height: 40px;
+/* In the sheet the list is rendered inline (`inline` on the component): the
+   panel is static and always open, because a popup would be clipped by the
+   sheet's own scroll container. The globe button is not rendered at all in
+   that mode, so there is no control that opens an already-open list. */
+.k-mobile-lang .k-lang {
+  display: block;
+  width: 100%;
+}
+
+.k-mobile-lang .k-lang-menu {
+  position: static;
+  min-width: 0;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  box-shadow: none;
+  background: rgba(255, 255, 255, 0.025);
 }

@@ -31,8 +31,12 @@ const indexUrl = new URL('../index.html', import.meta.url)
 
 function walk(dir: URL, rel = '', out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
-    const child = new URL(`${entry}/`, dir)
-    if (statSync(child).isDirectory()) walk(child, `${rel}${entry}/`, out)
+    // Stat the file itself, not `entry/`. Appending a slash to a *file* name
+    // makes statSync throw ENOTDIR on POSIX, which took the whole suite down
+    // before a single assertion ran -- so the brand-name check silently never
+    // checked anything on macOS or Linux.
+    const child = new URL(entry, dir)
+    if (statSync(child).isDirectory()) walk(new URL(`${entry}/`, dir), `${rel}${entry}/`, out)
     else if (/\.(tsx|ts|css|html)$/.test(entry)) out.push(`${rel}${entry}`)
   }
   return out
@@ -54,7 +58,7 @@ const ROOT = 'کالیم'
  * so an exact full-word match is skipped. Anything else opening with
  * کالی still fails: the allowlist is one whole word, not a prefix.
  */
-const KNOWN_WORDS = new Set(['کالیبراسیون'])
+const KNOWN_WORDS = new Set(['کالیبراسیون', 'کالیبره', 'کالیبراسیون‌'])
 
 describe('the product name', () => {
   it('is spelled کالیما wherever it appears', () => {
@@ -64,8 +68,13 @@ describe('the product name', () => {
       // Any run of Persian letters that opens with the product's first three
       // letters but is not the name is a misspelling, whatever follows it.
       for (const match of source.matchAll(/کا[‌ ]?ل[‌ ]?ی[‌ ]?[\u0600-\u06ff]*/g)) {
-        if (!match[0].startsWith(NAME) && !KNOWN_WORDS.has(match[0])) {
-          offenders.push(`${name}: ${match[0]}`)
+        // The character class covers Persian punctuation too, so a word at the
+        // end of a clause arrived as «کالیبراسیون،» and missed the allowlist
+        // by one comma. Strip trailing punctuation before comparing: the
+        // question is how the word is spelled, not what follows it.
+        const word = match[0].replace(/[\u060C\u061B\u061F\u066B\u066C\u06D4.,;:!?]+$/, '')
+        if (!word.startsWith(NAME) && !KNOWN_WORDS.has(word)) {
+          offenders.push(`${name}: ${word}`)
         }
       }
     }

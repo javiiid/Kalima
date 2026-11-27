@@ -1,0 +1,48 @@
+/* ==========================================================================
+   KALIMA — landing display face
+
+   Geist Sans, variable (wght 100-900), latin subset, 69 KB, served from this
+   origin like Vazirmatn and Manrope so the page renders with the network
+   unplugged and no third party learns who is reading.
+
+   WHY THIS FILE EXISTS SEPARATELY
+   -------------------------------
+   `fonts-latin.css` and `fonts.generated.css` belong to the internal app and
+   are asserted by `tests/latin-font.test.ts` (Manrope for `html[lang='en']`)
+   and by `docs/build_fonts.py` (Vazirmatn, generated). Neither may be edited
+   for the landing. So the landing gets its own face file and its own family
+   name, and `--k-font` in `landing.css` is the only place that opts in.
+
+   That scoping is the whole point: `--font-sans` in `tokens.css` is untouched,
+   so no internal page changes typeface because the marketing page did.
+
+   WHY GEIST
+   ---------
+   Chosen from a rendered six-way specimen (Geist, Instrument Sans, Manrope,
+   Inter, Plus Jakarta Sans, DM Sans) at hero scale and at 12px, on both the
+   ink and paper surfaces. Geist held the tightest apertures at display size
+   without closing up at caption size, and its flat-sided round forms sit well
+   against the emerald accent. Instrument Sans was the runner-up: warmer and
+   more literary, but it loses definition in the small uppercase labels this
+   page leans on.
+
+   The landing is Latin-first. Persian still resolves through Vazirmatn, which
+   stays second in the `--k-font` stack and is the first family in `--k-font-fa`
+   for every RTL sample. Geist has no Arabic-script coverage, so it must never
+   be allowed to win an RTL run.
+   ========================================================================== */
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  /* `swap` rather than `block`: the hero headline is the largest text on the
+     page, and a 69 KB face over a cold cache is not worth an invisible first
+     paint. The fallback stack is metric-close enough that the reflow is one
+     line shift at most. */
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191,
+    U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}

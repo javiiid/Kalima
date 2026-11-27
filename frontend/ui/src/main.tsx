@@ -14,6 +14,9 @@ import { installCsrf } from './lib/csrf.ts'
 // asks for the family.
 import './styles/fonts.generated.css'
 import './styles/fonts-latin.css'
+// Geist, for the landing page only. Its own file so the app's Manrope face and
+// the generated Vazirmatn faces stay untouched (see fonts-landing.css).
+import './styles/fonts-landing.css'
 import './styles/tokens.css'
 import './styles/ui.css'
 

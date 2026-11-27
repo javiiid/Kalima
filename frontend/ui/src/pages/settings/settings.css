@@ -570,3 +570,46 @@
 .settings-system-save .settings-inline-status {
   margin: 0;
 }
+
+/* --------------------------------------------------------------------------
+   Providers tab (read-only)
+   -------------------------------------------------------------------------- */
+.settings-providers {
+  display: grid;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+
+.settings-providers-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  margin-bottom: var(--spacing-3);
+}
+
+.settings-providers-id {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+
+.settings-providers-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-control);
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+  font-size: var(--text-h3);
+  font-weight: 800;
+}
+
+.settings-providers-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}

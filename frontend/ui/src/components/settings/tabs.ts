@@ -20,6 +20,7 @@ export type SettingsTabKey =
   | 'appearance'
   | 'notifications'
   | 'diagnostics'
+  | 'providers'
   | 'system'
   | 'data'
 
@@ -40,6 +41,7 @@ export const SETTINGS_TABS: readonly SettingsTab[] = [
   { key: 'appearance', labelKey: 'settings.tab.appearance', icon: 'appearance', group: 'personal' },
   { key: 'notifications', labelKey: 'settings.tab.notifications', icon: 'notifications', group: 'personal' },
   { key: 'diagnostics', labelKey: 'settings.tab.diagnostics', icon: 'diagnostics', group: 'advanced' },
+  { key: 'providers', labelKey: 'settings.tab.providers', icon: 'providers', group: 'advanced' },
   { key: 'system', labelKey: 'settings.tab.system', icon: 'system', group: 'advanced' },
   { key: 'data', labelKey: 'settings.tab.data', icon: 'data', group: 'advanced' },
 ]

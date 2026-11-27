@@ -29,6 +29,7 @@ import { DataTab } from './settings/DataTab'
 import { DiagnosticsTab } from './settings/DiagnosticsTab'
 import { GeneralTab } from './settings/GeneralTab'
 import { NotificationsTab } from './settings/NotificationsTab'
+import { ProvidersTab } from './settings/ProvidersTab'
 import { ReadingTab } from './settings/ReadingTab'
 import { SystemTab } from './settings/SystemTab'
 import { TranslationTab } from './settings/TranslationTab'
@@ -279,6 +280,8 @@ export function SettingsPage() {
         )
       case 'diagnostics':
         return <DiagnosticsTab isAdmin={Boolean(meta.is_admin)} />
+      case 'providers':
+        return <ProvidersTab />
       case 'system':
         return <SystemTab isAdmin={Boolean(meta.is_admin)} />
       case 'data':

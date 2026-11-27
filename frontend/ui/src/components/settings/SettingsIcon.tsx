@@ -99,6 +99,14 @@ export function SettingsIcon({ name, size = 18 }: SettingsIconProps) {
           <circle cx="15" cy="18" r="2" />
         </>
       ) : null}
+      {name === 'providers' ? (
+        <>
+          <rect x="3" y="4" width="18" height="7" rx="2" />
+          <rect x="3" y="13" width="18" height="7" rx="2" />
+          <path d="M7 7.5h.01" />
+          <path d="M7 16.5h.01" />
+        </>
+      ) : null}
     </svg>
   )
 }

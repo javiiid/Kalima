@@ -16,7 +16,7 @@ import {
 } from '../src/components/settings/tabs.ts'
 
 describe('settings tabs', () => {
-  it('lists the eight sections in the documented order', () => {
+  it('lists the nine sections in the documented order', () => {
     assert.deepEqual(
       SETTINGS_TABS.map((tab) => tab.key),
       [
@@ -26,6 +26,7 @@ describe('settings tabs', () => {
         'appearance',
         'notifications',
         'diagnostics',
+        'providers',
         'system',
         'data',
       ],
@@ -41,6 +42,7 @@ describe('settings tabs', () => {
         'personal',
         'personal',
         'personal',
+        'advanced',
         'advanced',
         'advanced',
         'advanced',

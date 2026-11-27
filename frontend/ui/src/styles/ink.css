@@ -1,0 +1,94 @@
+/* ==========================================================================
+   KALIMA — the ink surface
+
+   The public surfaces (the landing page and the authentication pages) are a
+   fixed ink-and-emerald world regardless of the app theme. Their job is to
+   present and admit, not to be a second dashboard, so their palette cannot
+   ride on `tokens.css` -- that file is the internal app's, and every internal
+   page depends on it.
+
+   WHY THIS FILE EXISTS
+   --------------------
+   The roles below were declared inside `landing.css` under `.k-landing`. The
+   auth pages need the same ink, the same emerald and the same focus ring, and
+   the alternative was a second copy of twenty-odd hex values that would drift
+   the first time one of them was tuned. So the roles are declared once, here,
+   on every surface that opts in, and `landing.css` keeps only its layout.
+
+   The selector is `:where(...)`, which contributes no specificity. That
+   matters: `landing.css` and `auth.css` both style descendants of these
+   surfaces, and a zero-specificity token block can never win an argument
+   against them by accident.
+
+   Loaded before `tokens.css` in `main.tsx`. Custom properties are resolved at
+   use time, not declaration time, so the order only has to be stable -- but
+   declaring before the file that reads them keeps the cascade honest.
+   ========================================================================== */
+
+:where(.k-landing, .k-auth) {
+  /* --- ink ---------------------------------------------------------- */
+  --k-ink: #060807;
+  --k-ink-2: #090c0a;
+  --k-surface: #0f1412;
+  --k-surface-2: #141a17;
+  --k-surface-3: #1a221e;
+
+  /* --- hairlines ---------------------------------------------------- */
+  --k-line: rgba(230, 242, 235, 0.1);
+  --k-line-strong: rgba(230, 242, 235, 0.18);
+
+  /* --- type --------------------------------------------------------- */
+  --k-text: #f1f5f2;
+  --k-text-soft: #c8d0cb;
+  --k-muted: #9ba7a0;
+  --k-faint: #7f8c85;
+
+  /* --- emerald ------------------------------------------------------ */
+  --k-emerald: #00c781;
+  --k-emerald-bright: #43e8ab;
+  /* The on-primary ink. Never white on emerald: #00c781 is a light colour and
+     white on it measures about 2.1:1. This is the token that exists so a
+     primary button never has to make that mistake. */
+  --k-emerald-ink: #032117;
+  --k-emerald-soft: rgba(0, 199, 129, 0.12);
+  --k-emerald-line: rgba(0, 199, 129, 0.34);
+
+  /* --- status ------------------------------------------------------- */
+  --k-warn: #e5bd72;
+  --k-danger: #ff8f8f;
+  --k-danger-soft: rgba(255, 143, 143, 0.1);
+  --k-danger-line: rgba(255, 143, 143, 0.4);
+
+  /* --- paper (the light counter-surface) ---------------------------- */
+  --k-paper: #f2efe6;
+  --k-paper-2: #e9e5da;
+  --k-paper-line: rgba(14, 24, 18, 0.14);
+  --k-paper-text: #0b1711;
+  --k-paper-muted: #4e5d55;
+  --k-paper-emerald: #076a48;
+
+  /* --- focus -------------------------------------------------------- */
+  --k-focus: #7dffd0;
+  --k-focus-paper: #045f3f;
+
+  /* --- type stacks -------------------------------------------------- */
+  /* Geist for Latin, Vazirmatn for Persian. Geist has no Arabic-script
+     coverage, so it must never win an RTL run -- Vazirmatn is second here and
+     first in --k-font-fa, which every RTL sample opts into explicitly. */
+  --k-font: 'Geist', 'Vazirmatn', system-ui, -apple-system, sans-serif;
+  --k-font-fa: 'Vazirmatn', 'Geist', system-ui, -apple-system, sans-serif;
+
+  /* --- rhythm ------------------------------------------------------- */
+  --k-gutter: clamp(1.25rem, 4vw, 3rem);
+  --k-max: 1200px;
+  --k-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --k-radius: 14px;
+}
+
+/* Prevent the browser's light canvas from flashing behind the dark page on
+   overscroll. Scoped to the surface being mounted, so internal pages keep
+   their own theme. */
+body:has(.k-landing),
+body:has(.k-auth) {
+  background: #060807;
+}

@@ -42,9 +42,11 @@ const srcDir = new URL('../src/', import.meta.url)
 /** Every .tsx under src, recursively. */
 function walk(dir: URL, rel = '', out: Array<{ name: string; source: string }> = []) {
   for (const entry of readdirSync(dir)) {
-    const child = new URL(`${entry}/`, dir)
+    // Stat the entry itself. `entry/` on a *file* throws ENOTDIR on POSIX,
+    // which killed this suite before it asserted anything on macOS and Linux.
+    const child = new URL(entry, dir)
     if (statSync(child).isDirectory()) {
-      walk(child, `${rel}${entry}/`, out)
+      walk(new URL(`${entry}/`, dir), `${rel}${entry}/`, out)
     } else if (entry.endsWith('.tsx') && !entry.endsWith('.d.tsx')) {
       // Built from `entry` rather than from the URL: a URL for a *file* keeps the
       // trailing slash the directory URL carried, so every name came out as

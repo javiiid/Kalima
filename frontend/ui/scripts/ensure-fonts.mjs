@@ -29,6 +29,13 @@ const EXPECTED_FILES = [
   'Vazirmatn-Black.woff2',
 ]
 
+// The landing page's display face. Declared by `src/styles/fonts-landing.css`,
+// provisioned by `../docs/build_landing_font.py`. It is checked separately
+// because its fix command is different, and because a missing Geist is silent:
+// Latin text simply falls back to Vazirmatn and the page looks subtly wrong
+// rather than broken.
+const LANDING_FONT = 'Geist-Variable.woff2'
+
 const problems = []
 
 if (!existsSync(GENERATED)) {
@@ -42,10 +49,18 @@ if (!existsSync(FONT_DIR)) {
   for (const filename of EXPECTED_FILES) {
     if (!present.has(filename)) problems.push(`missing ${join(FONT_DIR, filename)}`)
   }
+  if (!present.has(LANDING_FONT)) {
+    problems.push(
+      `missing ${join(FONT_DIR, LANDING_FONT)} (landing display face)`,
+    )
+  }
   // A partial set would render some weights synthesised, which looks like a
   // font bug rather than a missing file.
   const extra = [...present].filter(
-    (name) => name.endsWith('.woff2') && !EXPECTED_FILES.includes(name),
+    (name) =>
+      name.endsWith('.woff2') &&
+      !EXPECTED_FILES.includes(name) &&
+      name !== LANDING_FONT,
   )
   if (extra.length > 0) {
     console.warn(`  note: ${extra.length} unexpected woff2 file(s) in public/fonts`)
@@ -62,6 +77,7 @@ if (problems.length > 0) {
   console.error('  Python project:')
   console.error('')
   console.error('    python ..\\docs\\build_fonts.py')
+  console.error('    python ..\\docs\\build_landing_font.py')
   console.error('')
   console.error('  It reads the woff2 files from')
   console.error('  D:\\J_BookTranslate_V\\app\\library so the font is never tracked')

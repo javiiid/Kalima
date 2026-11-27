@@ -31,7 +31,7 @@
  */
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 
 const configUrl = new URL('../vite.config.ts', import.meta.url)
 const appUrl = new URL('../src/App.tsx', import.meta.url)
@@ -233,9 +233,37 @@ describe('every React route renders a React page', () => {
   it('the landing page uses the shared chrome rather than its own header', () => {
     // A marketing page that reinvents the shell is how the two halves of the app
     // start to look like different products.
+    //
+    // The landing was rebuilt into `src/components/landing/`, so the shared
+    // pieces are imported by the nav and the footer rather than by the page
+    // file itself. Checking only `LandingPage.tsx` would now pass or fail on
+    // where a component happens to live, not on the thing this test is for, so
+    // the assertion follows the whole landing subtree -- and it is stricter
+    // than before: the brand mark must come from AppShell, and no landing file
+    // may ship its own copy of it.
     const source = readFileSync(new URL('../src/pages/LandingPage.tsx', import.meta.url), 'utf8')
-    assert.ok(/from '@\/components\/AppShell'/.test(source), 'LandingPage does not use the shared chrome')
     assert.ok(/className="page"/.test(source), 'LandingPage does not use the .page gutter')
+
+    const landingDir = new URL('../src/components/landing/', import.meta.url)
+    const files = readdirSync(landingDir).filter((name) => name.endsWith('.tsx'))
+    assert.ok(files.length > 0, 'the landing components directory is empty')
+
+    const subtree = files.map((name) => ({
+      name,
+      source: readFileSync(new URL(name, landingDir), 'utf8'),
+    }))
+
+    assert.ok(
+      subtree.some((file) => /from '\.\.\/AppShell'/.test(file.source)),
+      'no landing component imports the shared chrome from AppShell',
+    )
+
+    for (const file of subtree) {
+      assert.ok(
+        !/<svg[^>]*viewBox="0 0 24 24"[\s\S]{0,400}?kalima/i.test(file.source),
+        `${file.name} defines its own brand mark instead of using KalimaMark`,
+      )
+    }
   })
 })
 

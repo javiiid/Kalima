@@ -19,11 +19,24 @@ import { MobileNav } from './MobileNav'
  * swaps the instant the toggle is pressed instead of on the next unrelated
  * render.
  */
-export function KalimaMark({ size = 34 }: { size?: number }) {
+export function KalimaMark({
+  size = 34,
+  variant = 'auto',
+}: {
+  size?: number
+  /**
+   * `auto` keeps the mark in step with the app theme, which is what every
+   * existing surface wants. The landing page is a fixed ink surface regardless
+   * of the app theme, so it asks for `dark` explicitly rather than showing the
+   * light-theme artwork on a near-black page.
+   */
+  variant?: 'auto' | 'dark' | 'light'
+}) {
   const { theme } = useTheme()
+  const resolved = variant === 'auto' ? theme : variant
   return (
     <img
-      src={theme === 'dark' ? '/brand/kalima-mark-dark.svg' : '/brand/kalima-mark-light.svg'}
+      src={resolved === 'dark' ? '/brand/kalima-mark-dark.svg' : '/brand/kalima-mark-light.svg'}
       alt=""
       width={size}
       height={size}

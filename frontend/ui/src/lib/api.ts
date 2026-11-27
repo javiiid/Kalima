@@ -1244,6 +1244,31 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /**
+   * Password recovery (`app/auth/service.py` owns the truth).
+   *
+   * Two steps, both already served by the backend: `request` issues a 6-digit
+   * code (15-minute TTL, single use, hashed at rest) and `confirm` consumes it
+   * and revokes every session. The request answers the same shape whether or
+   * not the address exists -- it is deliberately not an account oracle -- so
+   * the UI must never claim "no such account".
+   *
+   * When no SMTP is configured the server writes the code to its own log
+   * instead of sending mail; that is the server's business, and the response
+   * carries which channel was used so the page can say something true.
+   */
+  authRequestPasswordReset: (body: { email: string }) =>
+    request<{ sent: boolean; channel?: string }>('/api/auth/password-reset/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  authResetPassword: (body: { email: string; code: string; new_password: string }) =>
+    request<AuthResponse>('/api/auth/password-reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  /**
    * Start Google/Apple login. The server answers `{auth_url, state}` as JSON
    * (never a redirect), so the caller sets `window.location.href` itself and
    * the OAuth callback — which sets the cookie and 302s to /library — runs

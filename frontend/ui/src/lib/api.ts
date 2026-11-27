@@ -952,6 +952,14 @@ export const api = {
       `/api/jobs/${encodeURIComponent(id)}/${action}`,
       { method: 'POST' },
     ),
+  /**
+   * Permanently remove a finished job (row, meta and in-memory entry).
+   *
+   * The server refuses a queued/running job with `409` -- it must be stopped or
+   * cancelled first -- so the page disables the button while one is active.
+   */
+  deleteJob: (id: string) =>
+    request<{ ok: true }>(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   readerChapters: (id: string) =>
     request<{ book: string; items: Chapter[] }>(`/api/reader/${encodeURIComponent(id)}/chapters`),

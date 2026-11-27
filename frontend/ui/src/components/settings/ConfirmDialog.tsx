@@ -46,7 +46,7 @@ export function ConfirmDialog({
   return (
     <dialog
       ref={ref}
-      className="settings-dialog"
+      className="confirm-dialog"
       aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault()
@@ -56,11 +56,11 @@ export function ConfirmDialog({
         if (open) onCancel()
       }}
     >
-      <h2 id={titleId} className="settings-dialog-title">
+      <h2 id={titleId} className="confirm-dialog-title">
         {title}
       </h2>
-      <div className="settings-dialog-body">{children}</div>
-      <div className="settings-dialog-actions">
+      <div className="confirm-dialog-body">{children}</div>
+      <div className="confirm-dialog-actions">
         <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
           {cancelLabel}
         </button>

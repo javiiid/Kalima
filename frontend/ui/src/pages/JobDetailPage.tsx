@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import type { ChunkRow } from '@/lib/chunks'
 import { toRow } from '@/lib/chunks'
@@ -10,11 +10,15 @@ import { ChunksTab } from '@/components/monitor/ChunksTab'
 import { LogsTab } from '@/components/monitor/LogsTab'
 import { OverviewTab } from '@/components/monitor/OverviewTab'
 import { QaTab } from '@/components/monitor/QaTab'
+import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
 import { useLanguage } from '@/i18n/useLanguage.ts'
 
 type TabId = 'overview' | 'chunks' | 'qa' | 'logs' | 'assets'
 
 type ActionName = 'stop' | 'resume' | 'cancel' | 'rescue'
+
+/** What the confirmation dialog is currently asking about. */
+type ConfirmTarget = ActionName | 'delete'
 
 function Toast({ message, tone, onDone }: { message: string; tone: 'ok' | 'error'; onDone: () => void }) {
   useEffect(() => {
@@ -48,8 +52,10 @@ export function JobDetailPage({ initialTab = 'overview' }: { initialTab?: TabId 
   const { t, dir } = useLanguage()
   const { id = '' } = useParams()
   const client = useQueryClient()
+  const navigate = useNavigate()
   const [tab, setTab] = useState<TabId>(initialTab)
   const [pending, setPending] = useState<ActionName | null>(null)
+  const [confirming, setConfirming] = useState<ConfirmTarget | null>(null)
   const [toast, setToast] = useState<{ message: string; tone: 'ok' | 'error' } | null>(null)
 
   const tabs: { id: TabId; label: string }[] = [
@@ -135,9 +141,33 @@ export function JobDetailPage({ initialTab = 'overview' }: { initialTab?: TabId 
   })
 
   const runAction = (name: ActionName) => {
-    const entry = confirm[name]
-    if (entry && !window.confirm(`${entry.title}\n\n${entry.body}`)) return
+    if (confirm[name]) {
+      setConfirming(name)
+      return
+    }
     action.mutate(name)
+  }
+
+  // Deleting is separate from cancel: cancel stops a live job, delete removes a
+  // finished one for good. The server refuses a queued/running job with 409, so
+  // the button is disabled while work is in flight.
+  const remove = useMutation({
+    mutationFn: () => api.deleteJob(id),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['jobs'] })
+      navigate('/jobs', { replace: true })
+    },
+    onError: (error) => {
+      setToast({
+        message: error instanceof Error ? serverError(error.message) : t('monitor.delete.failed'),
+        tone: 'error',
+      })
+    },
+  })
+
+  const confirmDelete = () => {
+    if (remove.isPending) return
+    setConfirming('delete')
   }
 
   if (job.isPending) {
@@ -174,6 +204,34 @@ export function JobDetailPage({ initialTab = 'overview' }: { initialTab?: TabId 
 
   const data = job.data
   const busy = pending !== null
+  const running = data.status === 'queued' || data.status === 'running' || data.status === 'stopping'
+
+  // One dialog serves every confirmation on the page, so the wording and the
+  // colour of the destructive button stay consistent with Settings/Account.
+  const confirmCopy =
+    confirming === 'delete'
+      ? {
+          title: t('monitor.delete.confirmTitle'),
+          body: t('monitor.delete.confirmBody'),
+          label: t('monitor.delete.confirm'),
+          danger: true,
+        }
+      : confirming
+        ? {
+            title: confirm[confirming]?.title ?? '',
+            body: confirm[confirming]?.body ?? '',
+            label: t('settings.dialog.confirm'),
+            danger: confirming === 'cancel',
+          }
+        : null
+
+  const runConfirmed = () => {
+    const target = confirming
+    setConfirming(null)
+    if (!target) return
+    if (target === 'delete') remove.mutate()
+    else action.mutate(target)
+  }
 
   return (
     <main className="page" dir={dir}>
@@ -215,6 +273,15 @@ export function JobDetailPage({ initialTab = 'overview' }: { initialTab?: TabId 
             ) : null}
             <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => runAction('rescue')}>
               {actionLabels.rescue}
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger"
+              disabled={busy || remove.isPending || running}
+              title={running ? t('monitor.delete.runningHint') : undefined}
+              onClick={confirmDelete}
+            >
+              {remove.isPending ? t('monitor.delete.deleting') : t('monitor.delete.action')}
             </button>
           </div>
         </div>
@@ -270,6 +337,19 @@ export function JobDetailPage({ initialTab = 'overview' }: { initialTab?: TabId 
       {toast ? (
         <Toast message={toast.message} tone={toast.tone} onDone={() => setToast(null)} />
       ) : null}
+
+      <ConfirmDialog
+        open={confirmCopy !== null}
+        title={confirmCopy?.title ?? ''}
+        confirmLabel={confirmCopy?.label ?? t('settings.dialog.confirm')}
+        cancelLabel={t('settings.dialog.cancel')}
+        danger={confirmCopy?.danger ?? false}
+        busy={confirming === 'delete' ? remove.isPending : pending === confirming}
+        onConfirm={runConfirmed}
+        onCancel={() => setConfirming(null)}
+      >
+        <p>{confirmCopy?.body ?? ''}</p>
+      </ConfirmDialog>
     </main>
   )
 }

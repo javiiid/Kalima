@@ -727,6 +727,13 @@ export const fa = {
   'auth.emailHint': 'نشانی‌ای که با آن وارد می‌شوید.',
 
   // ---- monitor (job detail page) ----
+  'monitor.delete.action': 'حذف ترجمه',
+  'monitor.delete.deleting': 'در حال حذف…',
+  'monitor.delete.confirmTitle': 'حذف این ترجمه؟',
+  'monitor.delete.confirmBody': 'این ترجمه و متادیتای آن برای همیشه حذف می‌شود. این کار برگشت‌پذیر نیست.',
+  'monitor.delete.confirm': 'بله، حذف کن',
+  'monitor.delete.runningHint': 'اول ترجمه را متوقف یا لغو کنید.',
+  'monitor.delete.failed': 'حذف ترجمه ممکن نشد.',
   'monitor.title': 'پایش ترجمه',
   'monitor.back': '← بازگشت به داشبورد',
   'monitor.notFound': 'این کار پیدا نشد، یا سرور پایتون در دسترس نیست.',

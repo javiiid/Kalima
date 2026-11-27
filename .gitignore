@@ -66,6 +66,11 @@ desktop.ini
 temp/
 tmp/
 
+# Agent/run scratch at the repo root: .tmp-*.err logs and .tmp-test-db-*/
+# sandboxes. Anchored so a future source file named `.tmp-something` deeper in
+# the tree is not silently ignored.
+/.tmp-*
+
 # ============================================================
 # Job State / Progress
 # ============================================================

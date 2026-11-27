@@ -372,27 +372,26 @@
   color: var(--color-text-muted);
 }
 
-/* The row menu. `<details>` rather than a popover component: it opens on click
-   with no state to keep, closes on Escape with no handler to write, and keeps
-   working if the script that would close it on an outside click is not running --
-   which is the whole of the interaction. The one thing it gives up is closing on
-   an outside click, and a menu whose items are page navigations does not need
-   one.
+/* The row menu.
 
-   It is positioned absolutely out of the flow, so the `<summary>` needs no
-   wrapper of its own for the popover to sit beside -- hence `position: relative`
-   here rather than on a slot in the row's grid. */
+   This used to be a `<details>` whose list was `position: absolute` with no
+   inset, so it opened at the summary's static position: off the right edge for
+   a row near the end of the list, and past the bottom of the viewport for the
+   last rows. It is now a portalled, fixed-position popover (see `BookMenu`),
+   anchored to the trigger, flipped above when there is no room below, and
+   clamped inside the viewport. `.lib-menu` stays `position: relative` so the
+   trigger keeps its place in the row's grid. */
 .lib-menu {
   position: relative;
   justify-self: end;
 }
-.lib-menu > summary {
-  list-style: none;
+.lib-menu-trigger {
   cursor: pointer;
   display: grid;
   place-items: center;
   width: 2rem;
   height: 2rem;
+  padding: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
   background: var(--color-surface);
@@ -401,30 +400,33 @@
   line-height: 1;
 }
 
-.lib-menu > summary::-webkit-details-marker {
-  display: none;
-}
-
-.lib-menu > summary:hover {
+.lib-menu-trigger:hover {
   border-color: var(--color-primary);
   color: var(--color-text-primary);
 }
 
-.lib-menu[open] > summary {
+.lib-menu-trigger[aria-expanded='true'] {
   border-color: var(--color-primary);
   color: var(--color-text-brand);
 }
 
 .lib-menu-list {
-  position: absolute;
-  z-index: 20;
-  margin-top: var(--spacing-1);
+  position: fixed;
+  z-index: 60;
   min-width: 11rem;
+  max-height: min(70vh, 24rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--spacing-1);
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong-elevated);
   border-radius: var(--radius-control);
   box-shadow: var(--shadow-raised);
+}
+
+.lib-menu-list:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .lib-menu-list a,

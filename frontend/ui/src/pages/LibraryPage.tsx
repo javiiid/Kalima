@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
@@ -295,61 +296,167 @@ function BookMenu({ book }: { book: LibraryBook }) {
     remove.mutate()
   }
 
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null)
+
+  const close = useCallback(() => {
+    setOpen(false)
+    setPosition(null)
+  }, [])
+
+  // Place the menu after it is in the DOM, so its real size is known. The
+  // old absolute box was anchored to nothing: it opened downward at the
+  // summary's static position and ran off the right edge (or the bottom of
+  // the viewport) for a card near the end of the list. Here the menu is
+  // portalled to `body`, fixed to the trigger, flipped above when there is
+  // no room below, and clamped inside the viewport on both axes.
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => {
+      const anchor = triggerRef.current
+      const menu = menuRef.current
+      if (!anchor || !menu) return
+      const rect = anchor.getBoundingClientRect()
+      const width = menu.offsetWidth
+      const height = menu.offsetHeight
+      const gap = 6
+      const margin = 8
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      const spaceBelow = vh - rect.bottom - margin
+      const spaceAbove = rect.top - margin
+      const openUp = spaceBelow < height + gap && spaceAbove > spaceBelow
+      const top = openUp ? rect.top - gap - height : rect.bottom + gap
+      const rtl = getComputedStyle(anchor).direction === 'rtl'
+      // Align the menu's inline-end edge to the trigger's: right edge in LTR,
+      // left edge in RTL. Then clamp so it never leaves the viewport.
+      const preferred = rtl ? rect.left : rect.right - width
+      const left = Math.min(Math.max(margin, preferred), Math.max(margin, vw - width - margin))
+      setPosition({
+        top: Math.max(margin, Math.min(top, vh - height - margin)),
+        left,
+      })
+    }
+    place()
+    // Focus once, on open. `place` also runs on scroll/resize, and refocusing
+    // there would steal focus from the shelf `<select>` mid-interaction.
+    menuRef.current?.focus({ preventScroll: true })
+    window.addEventListener('resize', place)
+    // Capture phase: the list scrolls inside its own container, not the window.
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return
+      close()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      close()
+      triggerRef.current?.focus()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, close])
+
   return (
-    <details className="lib-menu">
-      <summary aria-label={t('library.optionsFor', { title: book.title })} title={t('library.options')}>
+    <div className="lib-menu">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="lib-menu-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('library.optionsFor', { title: book.title })}
+        title={t('library.options')}
+        onClick={() => setOpen((value) => !value)}
+      >
         …
-      </summary>
-      <div className="lib-menu-list">
-        {readable ? (
-          <Link to={readable.reader}>
-            <NavIcon name="reader" size={16} />
-            {t('dashboard.read')}
-          </Link>
-        ) : null}
-        {active?.job_id ? (
-          <Link to={`/jobs/${active.job_id}`}>
-            <NavIcon name="monitor" size={16} />
-            {t('nav.jobs')}
-          </Link>
-        ) : null}
-        {active?.download ? (
-          <a href={active.download}>
-            <NavIcon name="convert" size={16} />
-            {t('library.download')}
-          </a>
-        ) : null}
-        {canDelete ? (
-          <>
-            <span className="lib-menu-sep" aria-hidden="true" />
-            <label className="lib-menu-shelf">
-              <span>{t('library.shelf.set')}</span>
-              <select
-                value={shelf ?? ''}
-                disabled={moveShelf.isPending}
-                onChange={(event) => {
-                  const value = event.target.value
-                  moveShelf.mutate(value === '' ? null : (value as LibraryShelf))
-                }}
-              >
-                <option value="">{t('library.shelf.none')}</option>
-                <option value="want">{t('library.shelf.want')}</option>
-                <option value="reading">{t('library.shelf.reading')}</option>
-                <option value="finished">{t('library.shelf.finished')}</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              className="lib-menu-danger"
-              onClick={runDelete}
-              disabled={remove.isPending}
+      </button>
+      {open
+        ? createPortal(
+            <div
+              ref={menuRef}
+              className="lib-menu-list"
+              role="menu"
+              tabIndex={-1}
+              style={
+                position
+                  ? { top: position.top, left: position.left }
+                  : { top: 0, left: 0, visibility: 'hidden' }
+              }
             >
-              {t('library.deleteBook')}
-            </button>
-          </>
-        ) : null}
-      </div>
-    </details>
+              {readable ? (
+                <Link to={readable.reader} role="menuitem" onClick={close}>
+                  <NavIcon name="reader" size={16} />
+                  {t('dashboard.read')}
+                </Link>
+              ) : null}
+              {active?.job_id ? (
+                <Link to={`/jobs/${active.job_id}`} role="menuitem" onClick={close}>
+                  <NavIcon name="monitor" size={16} />
+                  {t('nav.jobs')}
+                </Link>
+              ) : null}
+              {active?.download ? (
+                <a href={active.download} role="menuitem" onClick={close}>
+                  <NavIcon name="convert" size={16} />
+                  {t('library.download')}
+                </a>
+              ) : null}
+              {canDelete ? (
+                <>
+                  <span className="lib-menu-sep" aria-hidden="true" />
+                  <label className="lib-menu-shelf">
+                    <span>{t('library.shelf.set')}</span>
+                    <select
+                      value={shelf ?? ''}
+                      disabled={moveShelf.isPending}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        moveShelf.mutate(value === '' ? null : (value as LibraryShelf))
+                      }}
+                    >
+                      <option value="">{t('library.shelf.none')}</option>
+                      <option value="want">{t('library.shelf.want')}</option>
+                      <option value="reading">{t('library.shelf.reading')}</option>
+                      <option value="finished">{t('library.shelf.finished')}</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="lib-menu-danger"
+                    onClick={() => {
+                      close()
+                      runDelete()
+                    }}
+                    disabled={remove.isPending}
+                  >
+                    {t('library.deleteBook')}
+                  </button>
+                </>
+              ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
   )
 }
 

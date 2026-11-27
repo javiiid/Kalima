@@ -143,6 +143,27 @@ def get_storage_config() -> dict:
     return {"auto_cleanup": bool(value)}
 
 
+def get_analytics_config() -> dict:
+    """Usage-ledger retention.
+
+    ``api_calls`` grows with every provider request, so raw rows are pruned
+    after ``analytics.retention_days``. Aggregates are computed on read, not
+    stored, so pruning only shortens how far back the page can look.
+    """
+    try:
+        config = read_config_safe()
+    except (FileNotFoundError, ValueError):
+        config = {}
+    analytics = config.get("analytics") or {}
+    if not isinstance(analytics, dict):
+        analytics = {}
+    try:
+        days = int(analytics.get("retention_days", 180))
+    except (TypeError, ValueError):
+        days = 180
+    return {"retention_days": max(7, min(days, 3650))}
+
+
 # ============================================================
 # Load Configuration
 # ============================================================

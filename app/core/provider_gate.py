@@ -17,11 +17,28 @@ about.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
+from app.core import usage
 from app.core.config import MAX_TRANSLATION_CONCURRENCY, get_translation_config
 from app.core.exceptions import TranslationStopped
 from app.core.rate_limit import AdaptiveRateLimiter
+
+UTC = timezone.utc
+
+
+def _failure_status(error: BaseException) -> str:
+    """Map an exception to the ledger's ``status`` vocabulary."""
+    if isinstance(error, TranslationStopped):
+        return "stopped"
+    name = type(error).__name__.lower()
+    if "ratelimit" in name or "rate_limit" in name or "429" in str(error):
+        return "rate_limited"
+    if "timeout" in name:
+        return "timeout"
+    return "error"
 
 
 class ProviderGate:
@@ -71,8 +88,29 @@ class _GatedCompletions:
         self._stop_event = stop_event
 
     def create(self, *args, **kwargs):
+        model = kwargs.get("model")
         with self._gate.slot(self._stop_event):
-            return self._completions.create(*args, **kwargs)
+            started_at = datetime.now(UTC)
+            started = time.perf_counter()
+            try:
+                response = self._completions.create(*args, **kwargs)
+            except BaseException as error:
+                usage.record_failure(
+                    model=model,
+                    started_at=started_at,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status=_failure_status(error),
+                    error_code=type(error).__name__,
+                )
+                raise
+            usage.record_success(
+                model=getattr(response, "model", None) or model,
+                started_at=started_at,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                usage_obj=getattr(response, "usage", None),
+                provider_id=getattr(response, "id", None),
+            )
+            return response
 
     def __getattr__(self, name):
         return getattr(self._completions, name)

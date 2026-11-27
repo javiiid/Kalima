@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core import usage
 from app.core.config import read_config_safe
 from app.core.models import model_request
 from app.output.markers import BOUNDARY_RE, NOTE_RE, strip_markers
@@ -668,7 +669,8 @@ def score_chunk(
                     glossary=glossary,
                     mode=mode,
                 )
-                response = llm_client.chat.completions.create(
+                response = usage.call_stage(
+                    "quality", llm_client.chat.completions.create,
                     **model_request(model),
                     messages=[
                         {

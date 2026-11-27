@@ -7,6 +7,7 @@ import { badgeClass, fa, faAgo, faBytes, faDuration, serverError, statusLabel } 
 import { attentionQueue, bucketByDay, greeting, heroStatus, missingFromChart, todayFa, weekStats } from '@/lib/dashboard'
 import { useLanguage } from '@/i18n/useLanguage.ts'
 import { ApiStatus } from '@/components/ApiStatus'
+import { AnalyticsPanel } from '@/components/AnalyticsPanel'
 import { BarChart } from '@/components/BarChart'
 import { NavIcon } from '@/components/NavIcon'
 import './dashboard.css'
@@ -51,10 +52,9 @@ import './dashboard.css'
  * so the button says what it costs by being a real button on a real job, and
  * there is nothing here that can destroy work.
  *
- * There is also no cost tile. `dashboard/summary` answers `estimated_cost`
- * with a hardcoded `0.0`, and `$0.00` beside a "start translating" button
- * reads as "free" rather than "unknown" -- so the number stays off the page
- * until the backend measures it.
+ * Cost is shown in the analytics section, not as a tile: it is measured per
+ * provider call now, so `$0.00` there means a real zero rather than the old
+ * hardcoded placeholder.
  *
  * ## Polling without noise
  *
@@ -291,7 +291,10 @@ export function DashboardPage() {
     },
   })
   const models = useQuery({ queryKey: ['models'], queryFn: api.models, staleTime: 60_000 })
-  const analytics = useQuery({ queryKey: ['analytics'], queryFn: api.analytics })
+  const analytics = useQuery({
+    queryKey: ['analytics', 'overview', '30d'],
+    queryFn: () => api.analytics({ since: '30d' }),
+  })
 
   const items = jobs.data?.items ?? []
   const queue = attentionQueue(items)
@@ -566,6 +569,9 @@ export function DashboardPage() {
                     />
                   </section>
 
+                  {/* Analytics: measured per-call usage, not an estimate. */}
+                  <AnalyticsPanel />
+
                   {/* Everything else: recent jobs with a search scoped to the
                       loaded page. */}
                   <section className="dash-section" aria-labelledby="jobs-heading">
@@ -794,13 +800,13 @@ export function DashboardPage() {
                     <div className="dash-sys-row">
                       <dt className="dash-sys-label">{t('dashboard.chunks')}</dt>
                       <dd className="dash-sys-value">
-                        {analytics.isPending ? '…' : analytics.isError ? t('dashboard.unavailable') : fa(analytics.data?.completed_chunks)}
+                        {analytics.isPending ? '…' : analytics.isError ? t('dashboard.unavailable') : fa(analytics.data?.totals.chunks)}
                       </dd>
                     </div>
                     <div className="dash-sys-row">
                       <dt className="dash-sys-label">{t('dashboard.retries')}</dt>
                       <dd className="dash-sys-value">
-                        {analytics.isPending ? '…' : analytics.isError ? t('dashboard.unavailable') : fa(analytics.data?.retries)}
+                        {analytics.isPending ? '…' : analytics.isError ? t('dashboard.unavailable') : fa(analytics.data?.totals.retries)}
                       </dd>
                     </div>
                   </dl>

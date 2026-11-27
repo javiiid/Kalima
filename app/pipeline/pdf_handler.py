@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 import fitz  # PyMuPDF
 from openai import OpenAI
+from app.core import usage
 from app.core.models import model_request
 import re
 import subprocess
@@ -485,7 +486,8 @@ class PDFHandler:
 
             print(f"Processing page {page_num + 1} of {len(image_paths)}")
 
-            response = client.chat.completions.create(
+            response = usage.call_stage(
+                "pdf_vision", client.chat.completions.create,
                 **model_request(model),
                 messages=[
                     {

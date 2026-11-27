@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from app.core.paths import ensure_dir
@@ -35,7 +35,7 @@ def resolve_db_path() -> Path:
 DB_PATH = resolve_db_path()
 # Bump when the schema or any _migrate_* changes: a bump takes exactly one
 # timestamped backup BEFORE migrating. See backup_database().
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BACKUP_KEEP = 5
 BACKUP_MAX_AGE_SECONDS = 86400
 # Credits a brand-new account starts with. The account portal shows a balance
@@ -77,9 +77,13 @@ class Database:
 
     def initialize(self):
         schema = """
-        CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, filename TEXT NOT NULL, input_path TEXT NOT NULL, filetype TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL, model TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, progress_completed INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, output_path TEXT, error TEXT, estimated_cost REAL NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, filename TEXT NOT NULL, input_path TEXT NOT NULL, filetype TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL, model TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, progress_completed INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, pages_total INTEGER, pages_completed INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, output_path TEXT, error TEXT, estimated_cost REAL NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS job_events (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, timestamp TEXT NOT NULL, level TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'job', event TEXT NOT NULL, message TEXT NOT NULL, recoverable INTEGER NOT NULL DEFAULT 1, data_json TEXT, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS job_chunks (job_id TEXT NOT NULL, chunk_id TEXT NOT NULL, status TEXT NOT NULL, source_text TEXT, translated_text TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(job_id, chunk_id), FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
+        -- One row per provider call. This is the source of truth for the
+        -- analytics page: token counts, duration, retries and cost cannot be
+        -- reconstructed from job_events (which are pruned and redacted).
+        CREATE TABLE IF NOT EXISTS api_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, job_id TEXT, chunk_id TEXT, model TEXT NOT NULL, stage TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, error_code TEXT, started_at TEXT NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, price_known INTEGER NOT NULL DEFAULT 0, provider_id TEXT, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, job_id TEXT, path TEXT NOT NULL, kind TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS glossaries (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, description TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, name));
         CREATE TABLE IF NOT EXISTS glossary_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, glossary_id INTEGER NOT NULL, source_term TEXT NOT NULL, target_term TEXT NOT NULL, notes TEXT DEFAULT '', UNIQUE(glossary_id, source_term), FOREIGN KEY(glossary_id) REFERENCES glossaries(id) ON DELETE CASCADE);
@@ -99,6 +103,12 @@ class Database:
         -- the whole append-only table.
         CREATE INDEX IF NOT EXISTS idx_job_events_time ON job_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_job_events_level_time ON job_events(level, timestamp);
+        -- The analytics page always filters by user and range, then groups by
+        -- model or stage; these cover the three access paths it uses.
+        CREATE INDEX IF NOT EXISTS idx_api_calls_user_time ON api_calls(user_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_api_calls_job ON api_calls(job_id);
+        CREATE INDEX IF NOT EXISTS idx_api_calls_model_time ON api_calls(model, started_at);
+        CREATE INDEX IF NOT EXISTS idx_api_calls_stage_time ON api_calls(stage, started_at);
         """
         with self._lock, self.connect() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -115,6 +125,7 @@ class Database:
             self._migrate_reading(connection)
             self._migrate_calibration_scope(connection)
             self._migrate_job_events(connection)
+            self._migrate_job_pages(connection)
             connection.execute("""CREATE TABLE IF NOT EXISTS book_glossaries (
                 user_id INTEGER NOT NULL DEFAULT 1,
                 book_id INTEGER NOT NULL REFERENCES library_books(id) ON DELETE CASCADE,
@@ -714,6 +725,65 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_job_events_category_time ON job_events(category, timestamp)"
         )
 
+    @staticmethod
+    def _migrate_job_pages(connection):
+        """Add the page counters used by the analytics overview.
+
+        Pages are only meaningful for PDF sources (one chunk can be a slice of
+        one page), so the columns stay NULL for EPUB and the UI shows "—"
+        instead of a number that would be a lie.
+        """
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+        if "pages_total" not in columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN pages_total INTEGER")
+        if "pages_completed" not in columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN pages_completed INTEGER")
+
+    def record_api_call(
+        self,
+        *,
+        user_id: int,
+        job_id: str | None,
+        chunk_id: str | None,
+        model: str,
+        stage: str,
+        attempt: int,
+        status: str,
+        error_code: str | None,
+        started_at: str,
+        duration_ms: int,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int,
+        cost_usd: float,
+        price_known: bool,
+        provider_id: str | None,
+    ) -> None:
+        """Append one provider-call row to the usage ledger."""
+        self.execute(
+            "INSERT INTO api_calls(user_id, job_id, chunk_id, model, stage, attempt,"
+            " status, error_code, started_at, duration_ms, input_tokens, output_tokens,"
+            " cached_tokens, cost_usd, price_known, provider_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(user_id or 1), job_id, chunk_id, model, stage, int(attempt),
+                status, error_code, started_at, int(duration_ms),
+                int(input_tokens), int(output_tokens), int(cached_tokens),
+                float(cost_usd), 1 if price_known else 0, provider_id,
+            ),
+        )
+
+    def prune_api_calls(self, retention_days: int) -> int:
+        """Delete ledger rows older than ``retention_days``. Returns the count."""
+        try:
+            days = max(1, int(retention_days))
+        except (TypeError, ValueError):
+            return 0
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock, self.connect() as connection:
+            cursor = connection.execute("DELETE FROM api_calls WHERE started_at < ?", (cutoff,))
+            return cursor.rowcount or 0
+
     def execute(self, sql: str, params: tuple = (), *, many: list[tuple] | None = None) -> int:
         with self._lock, self.connect() as connection:
             cursor = connection.cursor(); cursor.executemany(sql, many) if many is not None else cursor.execute(sql, params); return cursor.lastrowid or cursor.rowcount
@@ -726,7 +796,7 @@ class Database:
         with self._lock, self.connect() as connection: return [dict(row) for row in connection.execute(sql, params).fetchall()]
 
     def upsert_job(self, job: dict) -> None:
-        self.execute("""INSERT INTO jobs(id, user_id, filename, input_path, filetype, source_language, target_language, model, mode, status, progress_completed, progress_total, created_at, updated_at, output_path, error, estimated_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, status=excluded.status, progress_completed=excluded.progress_completed, progress_total=excluded.progress_total, updated_at=excluded.updated_at, output_path=excluded.output_path, error=excluded.error""", (job["id"], int(job.get("user_id") or 1), job["filename"], job["input_path"], job["filetype"], job["source_language"], job["target_language"], job["model"], job["mode"], job["status"], job.get("progress", {}).get("completed", 0), job.get("progress", {}).get("total", 0), job["created_at"], job["updated_at"], job.get("output_path"), job.get("error"), job.get("estimated_cost", 0.0)))
+        self.execute("""INSERT INTO jobs(id, user_id, filename, input_path, filetype, source_language, target_language, model, mode, status, progress_completed, progress_total, pages_total, pages_completed, created_at, updated_at, output_path, error, estimated_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, status=excluded.status, progress_completed=excluded.progress_completed, progress_total=excluded.progress_total, pages_total=excluded.pages_total, pages_completed=excluded.pages_completed, updated_at=excluded.updated_at, output_path=excluded.output_path, error=excluded.error""", (job["id"], int(job.get("user_id") or 1), job["filename"], job["input_path"], job["filetype"], job["source_language"], job["target_language"], job["model"], job["mode"], job["status"], job.get("progress", {}).get("completed", 0), job.get("progress", {}).get("total", 0), job.get("pages_total"), job.get("pages_completed"), job["created_at"], job["updated_at"], job.get("output_path"), job.get("error"), job.get("estimated_cost", 0.0)))
 
     def record_event(self, job_id: str | None, level: str, event: str, message: str, recoverable: bool = True, data: Any = None, category: str | None = None) -> None:
         resolved = category or category_for(event, data)

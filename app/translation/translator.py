@@ -40,6 +40,7 @@ from app.jobs.state import save_translations
 from app.jobs.state import deduplicate_chunks
 
 from app.core.paths import ensure_dir
+from app.core import usage as usage_ledger
 from app.core.job_log import bind as bind_job_log, emit_event
 from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
@@ -831,6 +832,8 @@ def translate_chunk(
 
         messages.append({"role": "user", "content": text})
 
+        usage_ledger.set_chunk(chunk_id)
+
         try:
             response = client.chat.completions.create(
                 **model_request(active_model),
@@ -870,6 +873,23 @@ def translate_chunk(
 
         max_attempts, base_delay, max_delay = _retry_settings()
 
+        usage_ledger.set_attempt(1)
+
+        def _on_retry(attempt_number, delay, error):
+            # The next request is a retry of the same chunk, so its ledger row
+            # is attempt N+1 and the analytics retry count is exact.
+            usage_ledger.set_attempt(attempt_number + 1)
+            emit_event(
+                "retry_scheduled",
+                f"Retry {attempt_number} in {delay:g}s for chunk {chunk_id}",
+                "WARNING",
+                category="retry",
+                chunk_id=str(chunk_id),
+                attempt=attempt_number,
+                delay=delay,
+                error=type(error).__name__,
+            )
+
         translated = retry_operation(
             operation=lambda: api_operation(active_model),
             max_attempts=max_attempts,
@@ -878,16 +898,7 @@ def translate_chunk(
             retryable_status_codes=tuple(
                 RETRYABLE_STATUS_CODES
             ),
-            on_retry=lambda attempt, delay, error: emit_event(
-                "retry_scheduled",
-                f"Retry {attempt} in {delay:g}s for chunk {chunk_id}",
-                "WARNING",
-                category="retry",
-                chunk_id=str(chunk_id),
-                attempt=attempt,
-                delay=delay,
-                error=type(error).__name__,
-            ),
+            on_retry=_on_retry,
             on_exhausted=lambda error: emit_event(
                 "retry_exhausted",
                 f"Retries exhausted for chunk {chunk_id}",
@@ -942,7 +953,8 @@ def translate_chunk(
                 f"-> {fallback_model} [translate_chunk]"
             )
 
-            translated_text = attempt(fallback_model)
+            with usage_ledger.stage("fallback"):
+                translated_text = attempt(fallback_model)
 
             _remember_chunk(
                 memory_db, text, translated_text, from_lang, to_lang,

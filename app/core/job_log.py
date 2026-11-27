@@ -22,6 +22,8 @@ import sys
 import threading
 from contextlib import contextmanager
 
+from app.core import usage as usage_ledger
+
 
 _lock = threading.RLock()
 _write_lock = threading.Lock()
@@ -30,6 +32,9 @@ _sinks: dict[int, io.TextIOBase] = {}
 # buffer by ``ThreadPoolExecutor(initializer=bind, initargs=(sink,))``, so the
 # callback is looked up by sink identity rather than by thread id.
 _event_sinks: dict[int, object] = {}
+# The usage ledger needs the same per-job identity, so it rides along with the
+# sink: ``bind()`` applies it to whichever thread the sink is bound to.
+_usage_contexts: dict[int, dict] = {}
 _installed = False
 _original_stdout: io.TextIOBase | None = None
 _original_stderr: io.TextIOBase | None = None
@@ -98,6 +103,7 @@ def uninstall() -> None:
         stdout, stderr = _original_stdout, _original_stderr
         _sinks.clear()
         _event_sinks.clear()
+        _usage_contexts.clear()
         _installed = False
     # Swap outside the lock: dropping the router's last reference runs its
     # ``flush``/``close``, which must not re-enter the lock we just held.
@@ -109,22 +115,36 @@ def bind(sink: io.TextIOBase) -> None:
     """Send this thread's output to ``sink`` until ``unbind``."""
     with _lock:
         _sinks[threading.get_ident()] = sink
+        context = _usage_contexts.get(id(sink))
+    if context:
+        usage_ledger.bind(**context)
 
 
 def unbind() -> None:
     with _lock:
         _sinks.pop(threading.get_ident(), None)
+    usage_ledger.unbind()
 
 
-def register_events(sink: io.TextIOBase, callback) -> None:
-    """Route ``emit_event`` calls from any thread bound to ``sink``."""
+def register_events(sink: io.TextIOBase, callback, usage: dict | None = None) -> None:
+    """Route ``emit_event`` calls from any thread bound to ``sink``.
+
+    ``usage`` is the job identity (``user_id``, ``job_id``, ``stage``) handed to
+    :mod:`app.core.usage` whenever a thread binds this sink, so every provider
+    call made on behalf of the job is attributed to it.
+    """
     with _lock:
         _event_sinks[id(sink)] = callback
+        if usage:
+            _usage_contexts[id(sink)] = dict(usage)
+        else:
+            _usage_contexts.pop(id(sink), None)
 
 
 def unregister_events(sink: io.TextIOBase) -> None:
     with _lock:
         _event_sinks.pop(id(sink), None)
+        _usage_contexts.pop(id(sink), None)
 
 
 def emit_event(event: str, message: str = "", level: str = "INFO", **data) -> None:

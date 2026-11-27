@@ -59,44 +59,10 @@ from app.pipeline.semantic_chunker import SemanticChunker, estimate_tokens
 # Pricing
 # ============================================================
 
-# USD per million tokens, as (input, output). A model absent from this table has
-# no known price, and the estimate says so rather than inventing one.
-PRICING: dict[str, tuple[float, float]] = {
-    # OpenAI GPT-4 family (prices per million tokens - actual as of Sep 2026)
-    "gpt-4": (30.00, 60.00),
-    "gpt-4-turbo": (10.00, 30.00),
-    "gpt-4o": (2.50, 10.00),
-    "gpt-4o-mini": (0.15, 0.60),
-    
-    # OpenAI GPT-3.5
-    "gpt-3.5-turbo": (0.50, 1.50),
-    "gpt-3.5-turbo-16k": (1.00, 2.00),
-    
-    # Anthropic Claude
-    "claude-3-opus-20240229": (15.00, 75.00),
-    "claude-3-sonnet-20240229": (3.00, 15.00),
-    "claude-3-haiku-20240307": (0.25, 1.25),
-    "claude-3-5-sonnet-20240620": (3.00, 15.00),
-    
-    # Google Gemini
-    "gemini-1.5-pro": (1.25, 5.00),
-    "gemini-1.5-flash": (0.075, 0.30),
-    "gemini-2.0-flash": (0.10, 0.40),
-    "gemini-pro": (0.50, 1.50),
-    
-    # Project custom models (adjust based on your actual provider pricing)
-    "gpt-5.6-luna": (0.15, 0.60),           # Equivalent to gpt-4o-mini
-    "gpt-5.6-terra": (2.50, 10.00),         # Equivalent to gpt-4o
-    "gemini-3.1-flash-lite": (0.075, 0.30), # Equivalent to gemini-1.5-flash
-    # DeepSeek V4.1 Flash (deepseek-flash / DeepSeek-V4.1-Flash-1017). Official
-    # list price, USD per million tokens: cache-miss input $0.15 off-peak /
-    # $0.30 peak, output $0.60 off-peak / $1.20 peak. Priced at the peak rate
-    # so the estimate is biased high; off-peak is half of this.
-    "deepseek-v4.1-flash": (0.30, 1.20),
-    # Same upstream model with reasoning disabled: identical price per token,
-    # but far fewer output tokens, so the real bill is lower.
-    "deepseek-v4.1-flash-low": (0.30, 1.20),
-}
+# USD per million tokens, as (input, output). The table lives in
+# ``app.core.pricing`` because the per-call usage recorder needs it too; it is
+# re-exported here so existing callers and tests keep importing it from here.
+from app.core.pricing import PRICING  # noqa: E402  (kept next to its use)
 
 
 # A translation is usually a little longer than its source. The spec's 1.1 is a

@@ -540,6 +540,7 @@ every blob forever. Download the newest backup any time from `/account`.
 | `pdf.max_garbage_ratio` | `0.35` | Share of symbol/control characters allowed in a page |
 | `pdf.vision_fallback` | `page` | `page` = only the problem page; `file` = phase 2 whole-file fallback |
 | `pdf.ocr_pages_threshold` | `0.3` | Scan share below which OCR runs on `--pages` only |
+| `analytics.retention_days` | `180` | Days of per-call usage kept in `api_calls` before pruning (7..3650) |
 
 `translation.max_retries`, `retry_delay` and `max_retry_delay` are read at the
 start of each chunk, so a change applies from the next chunk rather than only
@@ -558,6 +559,22 @@ after a restart.
 Log messages and structured data are redacted before they leave the server, and
 every query is scoped to the caller's jobs unless an admin explicitly asks for
 `scope=all`.
+
+### Analytics API
+
+Every provider call is recorded once in `api_calls` (tokens, cost, model,
+stage, attempt, duration, status), so the dashboard can report real spend
+instead of estimates. Rows older than `analytics.retention_days` are pruned at
+startup. All three routes are scoped to the caller; admins may add `scope=all`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/analytics/overview` | Nine headline metrics for a window (`since` = `24h`/`7d`/`30d`/`90d`/`all`/ISO, optional `until`, `job_id`, `model`, `stage`), plus the same numbers for the preceding window |
+| `GET /api/analytics/jobs` | One row per job (cost, tokens, retries, errors, avg chunk time); `sort=cost|tokens|duration|recent`, `limit`, `offset` |
+| `GET /api/analytics/cost` | Cost/token series plus breakdowns by model and stage; `bucket=day|week` |
+
+Calls made against a model with no entry in `app/core/pricing.py` are counted
+in `unknown_price_calls` and never folded into the total cost.
 
 ### Full example
 

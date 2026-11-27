@@ -6,6 +6,7 @@ import unicodedata
 from html import unescape
 from pathlib import Path
 
+from app.core import usage
 from app.glossary.service import load_snapshot, matching_terms
 from app.core.models import model_request
 from app.jobs.state import _atomic_json, state_lock
@@ -68,7 +69,8 @@ def learn_chunk(client, paths, chunk_id, source, translated, model, stop_event=N
         'translation': unescape(re.sub(r'<[^>]*>', ' ', translated)),
     }
     try:
-        response = client.chat.completions.create(
+        response = usage.call_stage(
+            "glossary_auto", client.chat.completions.create,
             **model_request(model),
             messages=[
                 {'role': 'system', 'content': (

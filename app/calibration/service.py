@@ -16,6 +16,7 @@ from app.calibration.engine import (TONES, VERSION, GLOSSARY_SYSTEM, ModelOutput
     compile_request, cost_micros, parse_json, token_estimate, token_reservation,
     validate_result)
 from app.calibration.store import Store, Conflict, BudgetExceeded, now
+from app.core import usage as usage_ledger
 from app.core.config import get_openai_config, get_translation_config, read_config_safe
 from app.core.models import is_supported_model, model_request, resolve_default_model
 from app.glossary.proposal import key as term_key
@@ -355,7 +356,8 @@ class CalibrationService:
         reservation_cost = cost_micros(reserved - request["max_tokens"], request["max_tokens"], rate)
         attempt = self.store.reserve(session, reserved, reservation_cost, phase)
         try:
-            response = self._client_for().chat.completions.create(**request)
+            with usage_ledger.acting_as(self.user_id, None, "calibration"):
+                response = self._client_for().chat.completions.create(**request)
         except BaseException:
             self.store.uncertain(attempt)
             raise

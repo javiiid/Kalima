@@ -27,6 +27,7 @@ import re
 import unicodedata
 from html import unescape
 
+from app.core import usage
 from app.glossary.service import matching_terms
 from app.core.models import model_request
 
@@ -149,7 +150,8 @@ def _parse(content, corpus: str) -> list[dict]:
 
 
 def _run(client, model, corpus, source_language, target_language, instructions: str):
-    response = client.chat.completions.create(
+    response = usage.call_stage(
+        "glossary_proposal", client.chat.completions.create,
         **model_request(model),
         messages=[
             {"role": "system", "content": _SYSTEM},

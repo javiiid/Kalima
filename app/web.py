@@ -31,6 +31,7 @@ from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
     get_openai_config,
     get_chunking_config,
+    get_analytics_config,
     get_storage_config,
     get_upload_limit_bytes,
     get_scheduler_config,
@@ -105,6 +106,7 @@ from app.logs.service import (
     list_events as logs_list_events,
     summary as logs_summary,
 )
+from app.analytics import service as analytics_service
 from app.settings.service import (
     SettingsError,
     get_system_settings,
@@ -373,6 +375,11 @@ class Job:
     error: str | None = None
     cancel_requested: bool = False
     progress: dict[str, int] = field(default_factory=lambda: {"completed": 0, "total": 0})
+    # PDF pages, not chunks: one chunk can be a slice of one page. NULL for
+    # EPUB, where "page" has no meaning, so the analytics page can say so
+    # instead of inventing a number.
+    pages_total: int | None = None
+    pages_completed: int | None = None
     assets: dict[str, str] = field(default_factory=dict)
     qa_report: str | None = None
     quality: dict | None = None
@@ -449,6 +456,7 @@ def _persist_job(job: Job) -> None:
         "updated_at": job.updated_at, "pipeline_job_id": job.pipeline_job_id,
         "paths": job.paths, "output_path": str(job.output_path) if job.output_path else None,
         "error": job.error, "progress": job.progress,
+        "pages_total": job.pages_total, "pages_completed": job.pages_completed,
         "assets": dict(job.assets or {}), "qa_report": job.qa_report,
         "quality": job.quality,
         "style": job.style,
@@ -824,12 +832,35 @@ def _update_progress(job: Job) -> None:
         previous = (job.progress["completed"], job.progress["total"])
         chunks = Path(job.paths["chunks_file"])
         translations = Path(job.paths["translations_file"])
+        chapter_map: dict = {}
         if chunks.exists():
             with chunks.open(encoding="utf-8") as file:
-                job.progress["total"] = len(json.load(file).get("chunks", []))
+                payload = json.load(file)
+                job.progress["total"] = len(payload.get("chunks", []))
+                chapter_map = payload.get("chapter_map") or {}
+        completed_ids: set[str] = set()
         if translations.exists():
             with translations.open(encoding="utf-8") as file:
-                job.progress["completed"] = len(json.load(file))
+                completed_ids = {str(key) for key in json.load(file)}
+                job.progress["completed"] = len(completed_ids)
+        # Pages are a PDF concept. chapter_map maps each chunk to the page it
+        # came from, so a page counts as done only when every chunk cut from it
+        # is translated -- otherwise a half-translated page would be reported
+        # as finished.
+        if job.filetype == "pdf" and chapter_map:
+            per_page: dict[str, int] = {}
+            done_per_page: dict[str, int] = {}
+            for chunk_id, entry in chapter_map.items():
+                page = str(entry.get("item")) if isinstance(entry, dict) and entry.get("item") else None
+                if not page:
+                    continue
+                per_page[page] = per_page.get(page, 0) + 1
+                if str(chunk_id) in completed_ids:
+                    done_per_page[page] = done_per_page.get(page, 0) + 1
+            job.pages_total = len(per_page)
+            job.pages_completed = sum(
+                1 for page, total in per_page.items() if done_per_page.get(page, 0) >= total
+            )
         if previous != (job.progress["completed"], job.progress["total"]):
             job.last_activity = job.updated_at = now()
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
@@ -853,6 +884,7 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
     register_events(
         job.log,
         lambda event, message, level, data: _job_event(job, event, message, level, data),
+        usage={"user_id": int(job.user_id), "job_id": job.id, "stage": "translate"},
     )
     with capture_job_log(job.log):
         try:
@@ -2204,8 +2236,45 @@ class Handler(BaseHTTPRequestHandler):
             result = next((item for item in library_summary("", uid)["items"] if str(item["id"]) == book_id), None)
             if not result: self._json({"error": "Book not found."}, 404); return
             self._json(result); return
-        if parsed.path == "/api/analytics/overview":
-            self._json(db.fetch_one("SELECT COUNT(*) AS jobs, COALESCE(SUM(progress_completed),0) AS completed_chunks, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(retry_count),0) AS retries FROM jobs WHERE user_id=?", (self._user_id(),)) or {}); return
+        if parsed.path.startswith("/api/analytics/"):
+            query = parse_qs(parsed.query)
+
+            def one(name, default=None):
+                return (query.get(name) or [default])[0]
+
+            all_users = one("scope", "mine") == "all"
+            if all_users and not self._is_admin():
+                self._json({"error": "forbidden"}, 403); return
+            common = {
+                "since": one("since", "30d"),
+                "until": one("until"),
+                "job_id": one("job_id"),
+                "model": one("model"),
+                "all_users": all_users,
+            }
+            try:
+                if parsed.path == "/api/analytics/overview":
+                    self._json(analytics_service.overview(
+                        db, self._user_id(), stage=one("stage"), **common,
+                    )); return
+                if parsed.path == "/api/analytics/jobs":
+                    self._json(analytics_service.jobs(
+                        db, self._user_id(),
+                        sort=one("sort", "cost"),
+                        limit=one("limit", "50"),
+                        offset=one("offset", "0"),
+                        **common,
+                    )); return
+                if parsed.path == "/api/analytics/cost":
+                    self._json(analytics_service.cost(
+                        db, self._user_id(),
+                        stage=one("stage"),
+                        bucket=one("bucket", "day"),
+                        **common,
+                    )); return
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400); return
+            self._json({"error": "not found"}, 404); return
         if parsed.path == "/api/settings":
             self._json(get_system_settings(db, is_admin=self._is_admin())); return
         if parsed.path == "/api/logs":
@@ -3110,6 +3179,11 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     install_job_log()
     restore_jobs()
+    try:
+        db.prune_api_calls(get_analytics_config()["retention_days"])
+    except Exception:
+        # Retention is housekeeping; a locked ledger must not stop the server.
+        pass
     host = (os.environ.get("KALIMA_HOST") or "127.0.0.1").strip()
     try:
         port = int(os.environ.get("KALIMA_PORT") or 8765)

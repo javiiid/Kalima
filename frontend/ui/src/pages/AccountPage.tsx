@@ -857,8 +857,8 @@ function SetupPanel({ config }: { config: ProviderConfig | undefined }) {
 function UsagePanel({ counts }: { counts: AccountPortal['overview']['counts'] }) {
   const { t } = useLanguage()
   const analytics = useQuery({
-    queryKey: ['analytics'],
-    queryFn: api.analytics,
+    queryKey: ['analytics', 'overview', '30d'],
+    queryFn: () => api.analytics({ since: '30d' }),
     staleTime: 60_000,
   })
 
@@ -890,8 +890,8 @@ function UsagePanel({ counts }: { counts: AccountPortal['overview']['counts'] })
   return (
     <Section id="usage" icon="chart" title={t('account.usage.title')}>
       <div className="acc-readouts">
-        <Readout label={t('account.usage.chunks')} value={fa(data.completed_chunks)} />
-        <Readout label={t('account.usage.retries')} value={fa(data.retries)} />
+        <Readout label={t('account.usage.chunks')} value={fa(data.totals.chunks)} />
+        <Readout label={t('account.usage.retries')} value={fa(data.totals.retries)} />
         <Readout label={t('account.usage.memory')} value={fa(counts.memory_entries)} />
         <Readout label={t('account.usage.apiKeys')} value={fa(counts.api_keys)} />
       </div>

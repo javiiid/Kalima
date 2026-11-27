@@ -419,16 +419,92 @@ export interface ProviderConfig {
   max_concurrency: number
 }
 
-export interface AnalyticsOverview {
-  jobs: number
-  completed_chunks: number
+/** The named windows the analytics page offers. `all` has no lower bound. */
+export type AnalyticsRange = '24h' | '7d' | '30d' | '90d' | 'all'
+
+export interface AnalyticsQuery {
+  since?: AnalyticsRange | string
+  until?: string
+  job_id?: string
+  model?: string
+  stage?: string
+  scope?: 'mine' | 'all'
+}
+
+/**
+ * The headline numbers. Chunks and pages come from the pipeline's own
+ * progress; the rest come from the per-call usage ledger.
+ */
+export interface AnalyticsTotals {
+  requests: number
   input_tokens: number
   output_tokens: number
-  /** Always 0.0: the provider layer does not persist token usage, so any
-   *  number here would be invented. Surfaced honestly as absent, not as zero
-   *  that reads like "free". */
-  estimated_cost: number
+  cost_usd: number
   retries: number
+  api_errors: number
+  /** Calls whose model has no price in the table. Their cost is not zero. */
+  unknown_price_calls: number
+  avg_chunk_ms: number
+  jobs: number
+  chunks: number
+  chunks_total: number
+  /** PDF only; `null` when the window holds no PDF job. */
+  pages: number
+  pages_total: number
+}
+
+export interface AnalyticsOverviewResponse {
+  range: { since: string | null; until: string | null }
+  totals: AnalyticsTotals
+  previous: AnalyticsTotals | null
+}
+
+export interface AnalyticsJobRow {
+  job_id: string
+  filename: string
+  model: string
+  status: string
+  filetype: string
+  chunks: number
+  chunks_total: number
+  pages: number | null
+  pages_total: number | null
+  created_at: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cost_usd: number
+  retries: number
+  api_errors: number
+  avg_chunk_ms: number
+}
+
+export interface AnalyticsJobsResponse {
+  items: AnalyticsJobRow[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface AnalyticsCostPoint {
+  bucket: string
+  calls: number
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+}
+
+export interface AnalyticsCostResponse {
+  range: { since: string | null; until: string | null; bucket: string }
+  series: AnalyticsCostPoint[]
+  by_model: Array<{
+    model: string
+    calls: number
+    cost_usd: number
+    input_tokens: number
+    output_tokens: number
+  }>
+  by_stage: Array<{ stage: string; calls: number; cost_usd: number }>
 }
 
 /* ------------------------------------------------------------------ */
@@ -788,6 +864,17 @@ function errorMessage(body: unknown, status: number): string {
     : `HTTP ${status}`
 }
 
+/** Serialise an analytics query, dropping empty values. */
+function analyticsQuery(params?: AnalyticsQuery): string {
+  if (!params) return ''
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue
+    query.set(key, String(value))
+  }
+  return query.toString() ? `?${query}` : ''
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -1065,7 +1152,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
-  analytics: () => request<AnalyticsOverview>('/api/analytics/overview'),
+  analytics: (params?: AnalyticsQuery) =>
+    request<AnalyticsOverviewResponse>(`/api/analytics/overview${analyticsQuery(params)}`),
+  analyticsJobs: (
+    params?: AnalyticsQuery & { sort?: 'cost' | 'tokens' | 'duration' | 'recent'; limit?: number; offset?: number },
+  ) =>
+    request<AnalyticsJobsResponse>(`/api/analytics/jobs${analyticsQuery(params)}`),
+  analyticsCost: (params?: AnalyticsQuery & { bucket?: 'day' | 'week' | 'model' | 'stage' }) =>
+    request<AnalyticsCostResponse>(`/api/analytics/cost${analyticsQuery(params)}`),
   logs: (params?: LogQuery) => {
     const query = new URLSearchParams()
     for (const [key, value] of Object.entries(params ?? {})) {

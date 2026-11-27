@@ -601,3 +601,219 @@ a.dash-tile:hover {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+/* --------------------------------------------------------------------------
+   Analytics
+
+   Nine measured figures, four charts and a per-book table, inside the
+   dashboard. The range control is a segmented group of buttons, not a
+   `<select>`: it is four to five short options and the current one must be
+   visible at a glance.
+   -------------------------------------------------------------------------- */
+.analytics-head {
+  align-items: flex-start;
+}
+
+.analytics-range,
+.analytics-sort {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.analytics-range-btn {
+  min-height: 32px;
+  padding: 0 var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.analytics-range-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.analytics-range-btn.is-active {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-brand);
+  box-shadow: var(--shadow-card);
+}
+
+.analytics-range-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.analytics-alert {
+  margin-bottom: var(--spacing-3);
+}
+
+.analytics-note {
+  margin-block: var(--spacing-2);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.analytics-note-warn {
+  padding: var(--spacing-2) var(--spacing-3);
+  background: var(--color-warning-subtle, var(--color-surface-sunken));
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+  margin-block: var(--spacing-3);
+}
+
+@media (min-width: 48rem) {
+  .analytics-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 72rem) {
+  .analytics-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+.analytics-metric {
+  min-width: 0;
+  padding: var(--spacing-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.analytics-metric-label {
+  display: block;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.analytics-metric-value {
+  display: block;
+  margin-top: var(--spacing-1);
+  font-size: var(--text-h3);
+  font-weight: 800;
+  line-height: var(--text-h3--line-height);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.analytics-metric-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-1) var(--spacing-2);
+  margin-top: var(--spacing-1);
+}
+
+.analytics-metric-hint {
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.analytics-delta {
+  font-size: var(--text-caption);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.analytics-delta.is-good {
+  color: var(--color-success);
+}
+
+.analytics-delta.is-bad {
+  color: var(--color-error);
+}
+
+.analytics-delta.is-flat {
+  color: var(--color-text-muted);
+}
+
+.analytics-charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-3);
+  margin-block: var(--spacing-3);
+}
+
+@media (min-width: 48rem) {
+  .analytics-charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.analytics-chart {
+  min-width: 0;
+  margin: 0;
+  padding: var(--spacing-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.analytics-chart-title {
+  margin-bottom: var(--spacing-2);
+  font-size: var(--text-caption);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.analytics-jobs {
+  margin-top: var(--spacing-4);
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-caption);
+}
+
+.analytics-table th,
+.analytics-table td {
+  padding: var(--spacing-2) var(--spacing-3);
+  text-align: start;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.analytics-table th {
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.analytics-table td {
+  color: var(--color-text-primary);
+}
+
+.analytics-job-name {
+  display: block;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.analytics-job-model {
+  display: block;
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}

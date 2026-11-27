@@ -31,6 +31,8 @@ from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
     get_openai_config,
     get_chunking_config,
+    get_storage_config,
+    get_upload_limit_bytes,
     get_scheduler_config,
     get_translation_config,
     normalize_base_url,
@@ -45,7 +47,12 @@ from app.core.models import (
     resolve_default_model,
 )
 from app.core.paths import ensure_dir
-from app.core.job_log import capture as capture_job_log, install as install_job_log
+from app.core.job_log import (
+    capture as capture_job_log,
+    install as install_job_log,
+    register_events,
+    unregister_events,
+)
 from app.core.provider_gate import GatedClient, shared_gate, shared_rate_limiter
 from app.core.metrics import METRICS, prometheus_text
 from app.version import get_version
@@ -92,6 +99,16 @@ from app.preferences.service import (
     preferences_meta,
     reset_preferences,
     save_preferences,
+)
+from app.logs.service import (
+    job_events as logs_job_events,
+    list_events as logs_list_events,
+    summary as logs_summary,
+)
+from app.settings.service import (
+    SettingsError,
+    get_system_settings,
+    save_system_settings,
 )
 from app.auth.service import (
     SESSION_COOKIE,
@@ -723,15 +740,52 @@ def _describe_job_error(job: Job, error: Exception) -> tuple[str, str, dict]:
         return message, "insufficient_credit", {
             "error_code": "insufficient_credit",
             "action": "top_up_and_resume",
+            "category": "api",
             "completed": completed,
             "total": total,
             "remaining": remaining,
         }
+    category = _error_category(job, error)
     return _friendly_error(error), "translation_error", {
         "error_code": "translation_error",
         "action": "check_provider_settings",
+        "category": category,
         "exception": type(error).__name__,
     }
+
+
+def _error_category(job: Job, error: BaseException) -> str:
+    """Classify a failed job for the diagnostics page.
+
+    The pipeline does not tag its exceptions, so this is a deliberate
+    heuristic: the exception type first (provider SDK errors are named), then
+    the file type plus a few stage words. A misclassification costs a filter
+    chip, not correctness; the message and job link are unchanged.
+    """
+    name = type(error).__name__.lower()
+    text = str(error).lower()
+    if any(token in name for token in ("api", "rate", "connection", "timeout", "authentication", "permission")):
+        return "api"
+    if job.filetype == "pdf" and any(
+        token in text or token in name
+        for token in ("pdf", "ghostscript", "render", "ocr", "pymupdf", "fitz", "page")
+    ):
+        return "pdf"
+    if job.filetype == "epub" and any(
+        token in text or token in name
+        for token in ("epub", "zip", "chapter", "xml", "html", "badzipfile")
+    ):
+        return "epub"
+    return "crash"
+
+
+def _error_event_name(data: dict) -> str:
+    return {
+        "api": "api_error",
+        "pdf": "pdf_render_failed",
+        "epub": "epub_parse_failed",
+        "crash": "job_crash",
+    }.get(str(data.get("category") or ""), "failed")
 
 
 def _candidate_provider_config(payload: dict) -> tuple[dict[str, str], str]:
@@ -796,6 +850,10 @@ def _on_pipeline_started(job: Job, pipeline_job_id: str, paths: dict) -> None:
 
 def _run_job(job: Job, *, resume: bool = False) -> None:
     """Run one job on a scheduler slot, with its own log stream."""
+    register_events(
+        job.log,
+        lambda event, message, level, data: _job_event(job, event, message, level, data),
+    )
     with capture_job_log(job.log):
         try:
             job.status = "running"
@@ -822,7 +880,8 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
             else:
                 manifest = translate(client=client, input_path=job.input_path, output_path=job.output_path,
                     from_lang=job.options["from_lang"], to_lang=job.options["to_lang"], mode=mode,
-                    model=job.options["model"], resume_job_id=job.pipeline_job_id if resume else None, debug=True, filetype=job.filetype,
+                    model=job.options["model"], resume_job_id=job.pipeline_job_id if resume else None,
+                    debug=not get_storage_config()["auto_cleanup"], filetype=job.filetype,
                     output_formats=job.options.get("outputs"), translation_prompt=prompt, stop_event=job.stop_event,
                     style_preset=job.style,
                     fallback_model=job.options.get("fallback_model"),
@@ -870,9 +929,10 @@ def _run_job(job: Job, *, resume: bool = False) -> None:
                 job.status, job.error = "failed", message
                 job.last_activity = job.updated_at = now()
                 _persist_job(job)
-                _job_event(job, "failed", message, "ERROR", data)
+                _job_event(job, _error_event_name(data), message, "ERROR", data)
             traceback.print_exc()
         finally:
+            unregister_events(job.log)
             if job.options.get("calibration_id"):
                 from app.calibration.routes import get_service
                 state = {"completed": "COMPLETED", "cancelled": "CANCELLED", "paused": "PAUSED", "failed": "FAILED"}.get(job.status, "FULL_PROCESSING")
@@ -1424,8 +1484,9 @@ def _parse_upload(handler, *, required: bool = True):
 
     try:
         size = int(handler.headers.get("Content-Length", "0"))
-        if not 0 < size <= 1024 * 1024 * 1024:
-            raise ValueError("Upload size is missing or too large (1 GB max).")
+        limit = get_upload_limit_bytes()
+        if not 0 < size <= limit:
+            raise ValueError(f"Upload size is missing or too large ({limit // (1024 * 1024)} MB max).")
         raw = (
             f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
             + handler.rfile.read(size)
@@ -2028,7 +2089,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/auth/me":
             user = user_from_token(db, self._session_token())
             if user is None: self._json({"error": "وارد نشده‌اید."}, 401); return
-            self._json({"user": user}); return
+            self._json({"user": {**user, "is_admin": self._is_admin()}}); return
         if parsed.path == "/api/auth/sessions":
             try:
                 items = auth_list_sessions(db, self._session_token())
@@ -2146,23 +2207,61 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/analytics/overview":
             self._json(db.fetch_one("SELECT COUNT(*) AS jobs, COALESCE(SUM(progress_completed),0) AS completed_chunks, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(estimated_cost),0) AS estimated_cost, COALESCE(SUM(retry_count),0) AS retries FROM jobs WHERE user_id=?", (self._user_id(),)) or {}); return
         if parsed.path == "/api/settings":
-            if not self._is_admin():
-                self._json({"items": []}); return
-            settings = db.fetch_all("SELECT key, value_json, updated_at FROM settings ORDER BY key")
-            self._json({"items": [{**item, "value": json.loads(item.pop("value_json"))} for item in settings]}); return
+            self._json(get_system_settings(db, is_admin=self._is_admin())); return
         if parsed.path == "/api/logs":
-            level = next((item.split("=", 1)[1] for item in parsed.query.split("&") if item.startswith("level=")), None)
-            uid = self._user_id()
-            if level:
-                self._json({"items": db.fetch_all("SELECT e.* FROM job_events e JOIN jobs j ON j.id=e.job_id WHERE j.user_id=? AND e.level=? ORDER BY e.timestamp DESC LIMIT 200", (uid, level.upper()))})
-            else:
-                self._json({"items": db.fetch_all("SELECT e.* FROM job_events e JOIN jobs j ON j.id=e.job_id WHERE j.user_id=? ORDER BY e.timestamp DESC LIMIT 200", (uid,))})
-            return
-        if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/logs"):
-            job = self._job(parsed.path.split("/")[-2])
-            if not job:
+            query = parse_qs(parsed.query)
+            scope = (query.get("scope") or ["mine"])[0]
+            all_users = scope == "all"
+            if all_users and not self._is_admin():
+                self._json({"error": "forbidden"}, 403); return
+            try:
+                self._json(logs_list_events(
+                    db,
+                    self._user_id(),
+                    level=(query.get("level") or [None])[0],
+                    category=(query.get("category") or [None])[0],
+                    job_id=(query.get("job_id") or [None])[0],
+                    since=(query.get("since") or [None])[0],
+                    until=(query.get("until") or [None])[0],
+                    q=(query.get("q") or [None])[0],
+                    limit=(query.get("limit") or [100])[0],
+                    before_id=(query.get("before_id") or [None])[0],
+                    all_users=all_users,
+                )); return
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400); return
+        if parsed.path == "/api/logs/summary":
+            query = parse_qs(parsed.query)
+            scope = (query.get("scope") or ["mine"])[0]
+            all_users = scope == "all"
+            if all_users and not self._is_admin():
+                self._json({"error": "forbidden"}, 403); return
+            try:
+                self._json(logs_summary(
+                    db,
+                    self._user_id(),
+                    since=(query.get("since") or ["24h"])[0],
+                    job_id=(query.get("job_id") or [None])[0],
+                    all_users=all_users,
+                )); return
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400); return
+        if parsed.path.startswith("/api/jobs/") and (parsed.path.endswith("/logs") or parsed.path.endswith("/events")):
+            query = parse_qs(parsed.query)
+            scope = (query.get("scope") or ["mine"])[0]
+            all_users = scope == "all"
+            if all_users and not self._is_admin():
+                self._json({"error": "forbidden"}, 403); return
+            payload = logs_job_events(
+                db,
+                parsed.path.split("/")[-2],
+                self._user_id(),
+                order=(query.get("order") or ["asc"])[0],
+                all_users=all_users,
+            )
+            if payload is None:
                 self._json({"error": "کار موردنظر پیدا نشد."}, 404); return
-            self._json({"items": db.fetch_all("SELECT * FROM job_events WHERE job_id=? ORDER BY timestamp ASC", (job.id,))}); return
+            self._json(payload); return
         if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/chunks"):
             self._json(_job_chunks_payload(self._job(parsed.path.split("/")[-2]))); return
         if parsed.path == "/api/health":
@@ -2357,8 +2456,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "فرم آپلود نامعتبر است."},400); return
             try:
                 size = int(self.headers.get("Content-Length","0"))
-                if not 0 < size <= 1024*1024*1024:
-                    raise ValueError("فایل خالی است یا بیش از ۱ گیگابایت حجم دارد.")
+                limit = get_upload_limit_bytes()
+                if not 0 < size <= limit:
+                    raise ValueError(f"فایل خالی است یا بیش از {limit // (1024 * 1024)} مگابایت حجم دارد.")
                 message = BytesParser(policy=policy.default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()+self.rfile.read(size))
                 fields, upload_name, upload_data = {}, "", b""
                 for part in message.iter_parts():
@@ -2934,8 +3034,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             if not self._is_admin():
                 self._json({"error": "تنظیمات سراسری فقط برای مدیر سرور است."}, 403); return
-            for key, value in body.items(): db.execute("INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at", (str(key), json.dumps(value, ensure_ascii=False), now()))
-            self._json({"ok": True}); return
+            try:
+                self._json(save_system_settings(db, body, is_admin=True)); return
+            except SettingsError as exc:
+                self._json({"error": str(exc), "field": exc.field}, 400); return
         if path.startswith("/api/library/") and path.count("/") == 3:
             book_id = path.rsplit("/", 1)[-1]
             if not self._owned_book(book_id):

@@ -122,8 +122,110 @@ class PDFHandler:
         return output_pdf_path
 
     @staticmethod
-    def save_translated_pdf(translations, output_pdf_path):
-        """Write a new PDF document from HTML pages"""
+    def _chapter_page_index(chapter_map, chunk_id):
+        """Return the 0-based source page for a chunk, or ``None``."""
+        location = (chapter_map or {}).get(chunk_id)
+        if isinstance(location, dict):
+            item = location.get("item", "")
+        elif isinstance(location, (tuple, list)) and location:
+            item = location[0]
+        else:
+            return None
+        match = re.search(r"page_(\d+)", str(item or ""))
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _text_block_rects(page):
+        """Bounding boxes of the page's text blocks, ignoring empty ones."""
+        rects = []
+        try:
+            blocks = page.get_text("blocks")
+        except Exception:
+            return rects
+        for block in blocks:
+            if len(block) < 5 or not str(block[4]).strip():
+                continue
+            rect = fitz.Rect(block[:4])
+            if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+                continue
+            rects.append(rect)
+        return rects
+
+    @staticmethod
+    def _translation_rect(page, rects, margin=36):
+        """The area the translation should occupy on the copied page."""
+        page_rect = page.rect
+        if rects:
+            area = fitz.Rect(rects[0])
+            for rect in rects[1:]:
+                area |= rect
+            pad = max(6.0, min(24.0, area.height * 0.15))
+            area = fitz.Rect(
+                margin,
+                max(margin, area.y0 - pad),
+                page_rect.width - margin,
+                min(page_rect.height - margin, area.y1 + pad),
+            )
+        else:
+            area = fitz.Rect(
+                margin,
+                margin,
+                page_rect.width - margin,
+                page_rect.height - margin,
+            )
+        if area.is_empty or area.width <= 1 or area.height <= 1:
+            area = fitz.Rect(
+                margin,
+                margin,
+                page_rect.width - margin,
+                page_rect.height - margin,
+            )
+        return area
+
+    @staticmethod
+    def _insert_translated_page(doc, original_doc, page_index, html_content):
+        """Copy one source page, remove its text only, and add the translation.
+
+        ``apply_redactions`` is told to keep images and line art, so figures,
+        charts and scanned illustrations survive while the original text is
+        removed. The translation is then placed over the text area the source
+        page used.
+        """
+        doc.insert_pdf(
+            original_doc,
+            from_page=page_index,
+            to_page=page_index,
+        )
+        page = doc[-1]
+        rects = PDFHandler._text_block_rects(page)
+        for rect in rects:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+        if rects:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            )
+        PDFHandler.insert_htmlbox_safe(
+            page,
+            PDFHandler._translation_rect(page, rects),
+            html_content,
+        )
+        return page
+
+    @staticmethod
+    def save_translated_pdf(
+        translations,
+        output_pdf_path,
+        original_pdf_path=None,
+        chapter_map=None,
+    ):
+        """Write a translated PDF, keeping the source pages' images.
+
+        When ``original_pdf_path`` and ``chapter_map`` are supplied, each source
+        page is copied, its text is redacted while images and line art are kept,
+        and the translation for that page is written over the original text
+        area. Without them the old text-only page-per-chunk writer is used.
+        """
         output_pdf_path = Path(output_pdf_path)  # Ensure it's a Path object
         temp_pdf_path = output_pdf_path.with_suffix('.temp.pdf')  # Temporary file for uncompressed PDF
         output_pdf_path.parent.mkdir(exist_ok=True)
@@ -132,11 +234,81 @@ class PDFHandler:
         page_height = 9.5 * 72
         margin = 0.5 * 72
 
-        for chunk_id in sorted(translations.keys(), key=lambda x: int(x.split('-')[1])):
-            html_content = translations[chunk_id]
-            page = doc.new_page(width=page_width, height=page_height)
-            # Insert HTML content into the page with a bounding box
-            PDFHandler.insert_htmlbox_safe(page, fitz.Rect(margin, margin, page_width - margin, page_height - margin), html_content)
+        original_doc = None
+        if original_pdf_path and chapter_map:
+            try:
+                original_doc = fitz.open(original_pdf_path)
+            except Exception as exc:
+                print(f"Warning: could not open source PDF for images ({exc}); using text-only pages.")
+
+        try:
+            if original_doc is not None:
+                grouped = {}
+                for chunk_id, html_content in translations.items():
+                    page_index = PDFHandler._chapter_page_index(
+                        chapter_map, chunk_id,
+                    )
+                    grouped.setdefault(page_index, []).append(
+                        (chunk_id, html_content)
+                    )
+
+                for page_index in sorted(
+                    grouped,
+                    key=lambda value: (value is None, value if value is not None else 0),
+                ):
+                    items = sorted(
+                        grouped[page_index],
+                        key=lambda item: int(str(item[0]).split('-')[-1]),
+                    )
+                    html_content = "<br/>".join(
+                        content for _, content in items
+                    )
+                    if page_index is not None and 0 <= page_index < len(original_doc):
+                        try:
+                            PDFHandler._insert_translated_page(
+                                doc,
+                                original_doc,
+                                page_index,
+                                html_content,
+                            )
+                            continue
+                        except Exception as exc:
+                            print(
+                                f"Warning: could not preserve images on "
+                                f"page {page_index + 1} ({exc}); "
+                                f"using a text-only page."
+                            )
+                    page = doc.new_page(width=page_width, height=page_height)
+                    PDFHandler.insert_htmlbox_safe(
+                        page,
+                        fitz.Rect(
+                            margin,
+                            margin,
+                            page_width - margin,
+                            page_height - margin,
+                        ),
+                        html_content,
+                    )
+            else:
+                for chunk_id in sorted(
+                    translations.keys(),
+                    key=lambda x: int(x.split('-')[1]),
+                ):
+                    html_content = translations[chunk_id]
+                    page = doc.new_page(width=page_width, height=page_height)
+                    PDFHandler.insert_htmlbox_safe(
+                        page,
+                        fitz.Rect(
+                            margin,
+                            margin,
+                            page_width - margin,
+                            page_height - margin,
+                        ),
+                        html_content,
+                    )
+        finally:
+            if original_doc is not None:
+                original_doc.close()
         
         # Save the uncompressed PDF to a temporary file
         doc.save(temp_pdf_path)
@@ -146,7 +318,12 @@ class PDFHandler:
         PDFHandler.compress_pdf(temp_pdf_path, output_pdf_path)
 
     @staticmethod
-    def save_bilingual_pdf(original_pdf_path, translations, output_pdf_path):
+    def save_bilingual_pdf(
+        original_pdf_path,
+        translations,
+        output_pdf_path,
+        chapter_map=None,
+    ):
         """Write a new PDF document alternating between original and translated pages."""
         output_pdf_path = Path(output_pdf_path)  # Ensure it's a Path object
         temp_pdf_path = output_pdf_path.with_suffix('.temp.pdf')  # Temporary file for uncompressed PDF
@@ -166,12 +343,52 @@ class PDFHandler:
             doc.insert_pdf(original_doc, from_page=page_num, to_page=page_num)
 
             # Add translated page
-            chunk_id = f'chunk-{page_num}'
-            if chunk_id in translations:
-                html_content = translations[chunk_id]
-                page = doc.new_page(width=page_width, height=page_height)
-                # Insert HTML content into the page with a bounding box
-                PDFHandler.insert_htmlbox_safe(page, fitz.Rect(margin, margin, page_width - margin, page_height - margin), html_content)
+            if chapter_map:
+                items = [
+                    (chunk_id, content)
+                    for chunk_id, content in translations.items()
+                    if PDFHandler._chapter_page_index(chapter_map, chunk_id)
+                    == page_num
+                ]
+                html_content = "<br/>".join(
+                    content
+                    for _, content in sorted(
+                        items,
+                        key=lambda item: int(str(item[0]).split('-')[-1]),
+                    )
+                )
+            else:
+                chunk_id = f'chunk-{page_num}'
+                html_content = translations.get(chunk_id, "")
+
+            if html_content:
+                try:
+                    PDFHandler._insert_translated_page(
+                        doc,
+                        original_doc,
+                        page_num,
+                        html_content,
+                    )
+                except Exception as exc:
+                    print(
+                        f"Warning: could not preserve images on "
+                        f"page {page_num + 1} ({exc}); "
+                        f"using a text-only page."
+                    )
+                    page = doc.new_page(
+                        width=page_width,
+                        height=page_height,
+                    )
+                    PDFHandler.insert_htmlbox_safe(
+                        page,
+                        fitz.Rect(
+                            margin,
+                            margin,
+                            page_width - margin,
+                            page_height - margin,
+                        ),
+                        html_content,
+                    )
 
         # Save the uncompressed PDF to a temporary file
         doc.save(temp_pdf_path)

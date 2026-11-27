@@ -53,7 +53,12 @@ from app.core.validation import ensure_disk_space, validate_book
 
 from app.core.exceptions import handle_interrupt
 
-from app.output.formats import generate_outputs
+from app.output.formats import (
+    EPUB_RENDERED_OUTPUTS,
+    generate_epub_outputs,
+    generate_outputs,
+    normalize_outputs,
+)
 from app.output.markers import strip_markers
 from app.output.segments import build_segments
 from app.pipeline.quality_scorer import make_scorer
@@ -560,6 +565,26 @@ def _translate_epub(
         # EXTRA OUTPUT FORMATS
         # ============================================================
 
+        requested_outputs = (
+            normalize_outputs(output_formats)
+            if output_formats
+            else []
+        )
+
+        # DOCX, PDF and Markdown carry structure and media, so they are built
+        # from the reassembled EPUB below. Everything else is text-only and
+        # keeps using the segment writers.
+        epub_rendered = [
+            name
+            for name in requested_outputs
+            if name in EPUB_RENDERED_OUTPUTS
+        ]
+        text_outputs = [
+            name
+            for name in requested_outputs
+            if name not in EPUB_RENDERED_OUTPUTS
+        ]
+
         if output_formats:
 
             print()
@@ -568,32 +593,44 @@ def _translate_epub(
                 "formats... [translate]"
             )
 
-            output_result = generate_outputs(
-                build_segments(
-                    all_chunks,
-                    translations,
-                    chapter_map,
+            if text_outputs:
+
+                output_result = generate_outputs(
+                    build_segments(
+                        all_chunks,
+                        translations,
+                        chapter_map,
+                        filetype="epub",
+                    ),
+                    requested=text_outputs,
+                    output_dir=output_path.parent,
+                    base_name=output_path.stem,
                     filetype="epub",
-                ),
-                requested=output_formats,
-                output_dir=output_path.parent,
-                base_name=output_path.stem,
-                filetype="epub",
-                title=input_path.stem,
-                to_lang=to_lang,
-                scorer=make_scorer(
-                    output_formats,
-                    client=client,
-                    model=model,
-                    source_lang=from_lang,
-                    target_lang=to_lang,
-                    filetype="epub",
-                    all_chunks=all_chunks,
-                    translations=translations,
-                    paths=paths,
-                    stop_event=stop_event,
-                ),
-            )
+                    title=input_path.stem,
+                    to_lang=to_lang,
+                    scorer=make_scorer(
+                        text_outputs,
+                        client=client,
+                        model=model,
+                        source_lang=from_lang,
+                        target_lang=to_lang,
+                        filetype="epub",
+                        all_chunks=all_chunks,
+                        translations=translations,
+                        paths=paths,
+                        stop_event=stop_event,
+                    ),
+                )
+
+            else:
+
+                output_result = {
+                    "generated": {},
+                    "skipped": {},
+                    "qa_report": None,
+                    "flagged": 0,
+                    "quality": None,
+                }
 
             translations = {
                 chunk_id: strip_markers(value)
@@ -651,6 +688,53 @@ def _translate_epub(
             f"Translated EPUB saved to: "
             f"{output_path} [translate]"
         )
+
+        if epub_rendered:
+
+            print()
+            print(
+                "Rendering EPUB-based DOCX/PDF/Markdown "
+                "with images... [translate]"
+            )
+
+            epub_result = generate_epub_outputs(
+                output_path,
+                epub_rendered,
+                output_path.parent,
+                output_path.stem,
+                to_lang=to_lang,
+            )
+
+            if manifest_outputs is None:
+
+                manifest_outputs = epub_result
+
+            else:
+
+                manifest_outputs["generated"].update(
+                    epub_result["generated"]
+                )
+                manifest_outputs["skipped"].update(
+                    epub_result["skipped"]
+                )
+
+            for name, item_path in sorted(
+                epub_result["generated"].items()
+            ):
+
+                print(
+                    f"  {name:<18}: {item_path} "
+                    f"[translate]"
+                )
+
+            for name, reason in sorted(
+                epub_result["skipped"].items()
+            ):
+
+                print(
+                    f"  {name:<18}: skipped ({reason}) "
+                    f"[translate]"
+                )
 
         success = True
 
@@ -870,7 +954,7 @@ def _translate_pdf(
     process_translations().
     """
 
-    from app.pipeline.pdf_handler import PDFHandler
+    from app.pipeline.pdf_handler import PDFHandler, merge_page_chunks
 
     success = False
 
@@ -1111,7 +1195,7 @@ def _translate_pdf(
                 pages=vision_pages,
             )
 
-        all_chunks, chapter_map, id_map = PDFHandler.merge_page_chunks(
+        all_chunks, chapter_map, id_map = merge_page_chunks(
             (text_chunks, text_map),
             (vision_chunks, vision_map),
         )
@@ -1305,6 +1389,7 @@ def _translate_pdf(
                 input_path,
                 translations,
                 output_path,
+                chapter_map=chapter_map,
             )
 
         else:
@@ -1317,6 +1402,8 @@ def _translate_pdf(
             PDFHandler.save_translated_pdf(
                 translations,
                 output_path,
+                original_pdf_path=source_pdf,
+                chapter_map=chapter_map,
             )
 
         print()

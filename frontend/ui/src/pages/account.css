@@ -1,0 +1,993 @@
+/* --------------------------------------------------------------------------
+   The account page.
+
+   Split out of `tokens.css` the way `dashboard.css` and `library.css` are:
+   the file next to the page that owns it, imported by that page. Every colour
+   is a semantic token, so both themes come for free and the contrast test
+   keeps covering the pairs.
+
+   The page is a console, not a marketing surface: one dark identity band, a
+   compact jump rail, then cards. No glass, no gradient buttons, no decoration
+   that is not carrying a fact.
+   -------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------
+   Identity band
+
+   Same vertical gradient axis and inks as the dashboard and library bands.
+   `to bottom`, never mirrored: an RTL page does not flip a vertical gradient.
+   -------------------------------------------------------------------------- */
+.acc-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-5);
+  padding: var(--spacing-5);
+  border-radius: var(--radius-panel);
+  background: linear-gradient(to bottom, var(--color-hero-from), var(--color-hero-to));
+  color: var(--color-hero-ink);
+}
+
+.acc-hero-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-4);
+  min-width: 0;
+  flex: 1 1 20rem;
+}
+
+.acc-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-panel);
+  background: var(--color-hero-ink);
+  color: var(--color-hero-to);
+  font-size: var(--text-h2);
+  font-weight: 800;
+  line-height: 1;
+}
+
+.acc-hero-eyebrow {
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-hero-ink-muted);
+}
+
+.acc-hero-name {
+  margin-top: var(--spacing-1);
+  font-size: var(--text-h1);
+  font-weight: 800;
+  line-height: var(--text-h1--line-height);
+  color: var(--color-hero-ink);
+  overflow-wrap: anywhere;
+}
+
+.acc-hero-meta {
+  margin-top: var(--spacing-1);
+  font-size: var(--text-small);
+  line-height: var(--text-small--line-height);
+  color: var(--color-hero-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.acc-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-3);
+}
+
+.acc-hero-badges .badge {
+  background: transparent;
+  border-color: var(--color-hero-ink-muted);
+  color: var(--color-hero-ink);
+}
+
+.acc-hero-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-4);
+  margin-inline-start: auto;
+}
+
+.acc-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  min-width: 0;
+}
+
+.acc-hero-cta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  min-width: 0;
+}
+
+/* The next-best-action hint: why this CTA, in one honest line. */
+.acc-hero-hint {
+  margin: 0;
+  max-width: 34ch;
+  font-size: var(--text-small);
+  line-height: var(--text-small--line-height);
+  color: var(--color-hero-ink-muted);
+}
+
+/* `btn-primary` is tuned for the page surface and fails AA on this ground,
+   so the band's primary action uses the band's own ink. */
+.acc-hero-primary {
+  background: var(--color-hero-ink);
+  border-color: var(--color-hero-ink);
+  color: var(--color-hero-to);
+}
+
+.acc-hero-primary:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+.acc-hero .btn-secondary {
+  background: transparent;
+  border-color: var(--color-hero-ink);
+  color: var(--color-hero-ink);
+}
+
+.acc-hero .btn-secondary:hover:not(:disabled) {
+  background: var(--color-hero-ink);
+  color: var(--color-hero-to);
+}
+
+/* --------------------------------------------------------------------------
+   Readiness ring
+
+   A ring rather than a percentage bar: the hero already carries a bar-shaped
+   progress idea on other pages, and a ring reads as "how complete is this
+   account" at a glance without competing with the identity text.
+   -------------------------------------------------------------------------- */
+.acc-ring-wrap {
+  display: grid;
+  justify-items: center;
+  gap: var(--spacing-1);
+}
+
+.acc-ring {
+  width: 92px;
+  height: 92px;
+}
+
+.acc-ring-track {
+  stroke: var(--color-hero-ink-muted);
+  opacity: 0.35;
+}
+
+.acc-ring-value {
+  stroke: var(--color-hero-ink);
+  transition: stroke-dashoffset 0.5s var(--ease-out);
+}
+
+.acc-ring-label {
+  fill: var(--color-hero-ink);
+  font-size: 19px;
+  font-weight: 800;
+  text-anchor: middle;
+}
+
+.acc-ring-caption {
+  font-size: var(--text-caption);
+  color: var(--color-hero-ink-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Jump rail
+
+   Sticky, because the page is long and the sections are independent. The
+   background is the page ground rather than a blur: a translucent rail over
+   cards is unreadable in the dark theme, and this project does not use
+   backdrop filters outside the modal scrim.
+   -------------------------------------------------------------------------- */
+.acc-jump {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: var(--spacing-2);
+  margin-block: var(--spacing-4);
+  padding-block: var(--spacing-2);
+  overflow-x: auto;
+  background: var(--color-background);
+  border-bottom: 1px solid var(--color-border);
+  scrollbar-width: none;
+}
+
+.acc-jump::-webkit-scrollbar {
+  display: none;
+}
+
+.acc-jump a {
+  flex: none;
+  padding: 4px var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-badge);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  line-height: 1.6;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+
+.acc-jump a:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text-primary);
+}
+
+.acc-jump a:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* A sticky rail must not cover the heading it just scrolled to. */
+.acc-section {
+  scroll-margin-top: 64px;
+}
+
+/* --------------------------------------------------------------------------
+   Section shell
+   -------------------------------------------------------------------------- */
+.acc-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-3);
+}
+
+.acc-h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  font-size: var(--text-h3);
+  font-weight: 800;
+  line-height: var(--text-h3--line-height);
+}
+
+.acc-h2 svg {
+  flex: none;
+  color: var(--color-text-brand);
+}
+
+.acc-note {
+  margin-top: var(--spacing-3);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Two-column body
+   -------------------------------------------------------------------------- */
+.acc-grid {
+  display: grid;
+  gap: var(--spacing-4);
+  align-items: start;
+}
+
+.acc-main,
+.acc-side {
+  display: grid;
+  gap: var(--spacing-4);
+  min-width: 0;
+  align-content: start;
+}
+
+@media (min-width: 64rem) {
+  .acc-grid {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Figures
+   -------------------------------------------------------------------------- */
+.acc-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-3);
+}
+
+@media (min-width: 64rem) {
+  .acc-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.acc-tile {
+  position: relative;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+  text-decoration: none;
+  transition: border-color 0.15s var(--ease-out);
+}
+
+.acc-tile:hover {
+  border-color: var(--color-primary);
+}
+
+.acc-tile:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.acc-tile-edge {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: var(--color-primary);
+}
+
+.acc-tile-label {
+  display: block;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+.acc-tile-value {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-h2);
+  font-weight: 800;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.acc-tile-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Readiness checklist
+   -------------------------------------------------------------------------- */
+.acc-readiness {
+  display: grid;
+  gap: var(--spacing-4);
+  align-items: center;
+}
+
+@media (min-width: 48rem) {
+  .acc-readiness {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+}
+
+/* The ring in the hero is the identity band's; this one sits on a card, so
+   its inks are card inks rather than band inks. */
+.acc-readiness .acc-ring-track {
+  stroke: var(--color-border-strong);
+  opacity: 1;
+}
+
+.acc-readiness .acc-ring-value {
+  stroke: var(--color-primary);
+}
+
+.acc-readiness .acc-ring-label {
+  fill: var(--color-text-primary);
+}
+
+.acc-readiness .acc-ring-caption {
+  color: var(--color-text-muted);
+}
+
+.acc-check {
+  display: grid;
+  gap: var(--spacing-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acc-check-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-width: 0;
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-elevated);
+}
+
+.acc-check-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-badge);
+  color: var(--color-text-muted);
+}
+
+.acc-check-item[data-done='true'] .acc-check-mark {
+  border-color: var(--color-success);
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.acc-check-body {
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.acc-check-title {
+  display: block;
+  font-size: var(--text-small);
+  font-weight: 600;
+  line-height: var(--text-small--line-height);
+  color: var(--color-text-primary);
+}
+
+.acc-check-hint {
+  display: block;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Next step
+   -------------------------------------------------------------------------- */
+.acc-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-primary-subtle);
+}
+
+.acc-next-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-control);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.acc-next-body {
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.acc-next-title {
+  display: block;
+  font-size: var(--text-small);
+  font-weight: 700;
+  line-height: var(--text-small--line-height);
+  color: var(--color-text-primary);
+}
+
+.acc-next-hint {
+  display: block;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-secondary);
+}
+
+/* Directional arrow: mirrored in RTL so "go" points the way the eye reads. */
+[dir='rtl'] .acc-arrow {
+  transform: scaleX(-1);
+}
+
+/* --------------------------------------------------------------------------
+   Profile form
+   -------------------------------------------------------------------------- */
+.acc-form-grid {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+@media (min-width: 40rem) {
+  .acc-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.acc-field {
+  display: grid;
+  gap: var(--spacing-1);
+  min-width: 0;
+}
+
+.acc-field-wide {
+  grid-column: 1 / -1;
+}
+
+.acc-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-3);
+}
+
+/* --------------------------------------------------------------------------
+   Reading activity
+   -------------------------------------------------------------------------- */
+.acc-activity-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--spacing-4);
+  margin-bottom: var(--spacing-3);
+}
+
+.acc-activity-figure {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-1);
+}
+
+.acc-activity-figure strong {
+  font-size: var(--text-h2);
+  font-weight: 800;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.acc-activity-figure span {
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
+
+.acc-spark {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: 2px;
+  height: 76px;
+  padding-top: var(--spacing-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.acc-spark-bar {
+  min-height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--color-primary-subtle-hover);
+}
+
+.acc-spark-bar[data-active='true'] {
+  background: var(--color-primary);
+}
+
+.acc-details {
+  margin-top: var(--spacing-3);
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
+
+.acc-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.acc-details summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.acc-table {
+  width: 100%;
+  margin-top: var(--spacing-2);
+  border-collapse: collapse;
+}
+
+.acc-table th,
+.acc-table td {
+  padding: var(--spacing-1) var(--spacing-2);
+  border-bottom: 1px solid var(--color-border-subtle);
+  text-align: start;
+}
+
+.acc-table th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Small readouts
+   -------------------------------------------------------------------------- */
+.acc-readout {
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-elevated);
+  min-width: 0;
+}
+
+.acc-readout .data-value {
+  overflow-wrap: anywhere;
+}
+
+.acc-readouts {
+  display: grid;
+  gap: var(--spacing-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (min-width: 40rem) {
+  .acc-readouts-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Lists (sessions, keys, packs)
+   -------------------------------------------------------------------------- */
+.acc-list {
+  display: grid;
+  gap: var(--spacing-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  min-width: 0;
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-elevated);
+}
+
+.acc-row-body {
+  min-width: 0;
+}
+
+.acc-row-title {
+  display: block;
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.acc-row-meta {
+  display: block;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Reduced motion
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .acc-ring-value {
+    transition: none;
+  }
+}
+
+[data-motion='off'] .acc-ring-value {
+  transition: none;
+}
+
+/* --------------------------------------------------------------------------
+   Section header actions and filter chips
+   -------------------------------------------------------------------------- */
+.acc-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.acc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+}
+
+.acc-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+
+.acc-chip:hover {
+  border-color: var(--color-border-strong);
+}
+
+.acc-chip[aria-pressed='true'] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.acc-chip:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Reading goal
+   -------------------------------------------------------------------------- */
+.acc-goal {
+  display: grid;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-3);
+  padding-top: var(--spacing-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.acc-goal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+}
+
+.acc-goal-label {
+  font-size: var(--text-small);
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.acc-goal-count {
+  font-size: var(--text-caption);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.acc-goal-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.acc-goal-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width 0.3s var(--ease-out);
+}
+
+.acc-goal-fill[data-done='true'] {
+  background: var(--color-success);
+}
+
+.acc-goal-hint {
+  margin: 0;
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
+
+.acc-goal-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+
+.acc-goal-form .field {
+  max-width: 8rem;
+}
+
+/* --------------------------------------------------------------------------
+   Publisher languages
+   -------------------------------------------------------------------------- */
+.acc-langs {
+  margin-top: var(--spacing-3);
+}
+
+.acc-lang-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  margin: var(--spacing-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acc-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: 3px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: var(--text-caption);
+}
+
+.acc-lang-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Data actions and inline links
+   -------------------------------------------------------------------------- */
+.acc-data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-3);
+}
+
+.acc-links {
+  display: grid;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-4);
+  padding-top: var(--spacing-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.acc-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  min-width: 0;
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-elevated);
+}
+
+.acc-link-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.acc-link-text strong {
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.acc-link-action {
+  text-decoration: none;
+  transition: border-color 0.15s var(--ease-out);
+}
+
+.acc-link-action:hover {
+  border-color: var(--color-primary);
+}
+
+.acc-link-action:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Create-key dialog
+   -------------------------------------------------------------------------- */
+.acc-dialog {
+  width: min(34rem, calc(100vw - 2rem));
+  padding: var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-raised);
+}
+
+.acc-dialog::backdrop {
+  background: rgba(7, 20, 38, 0.5);
+}
+
+.acc-dialog-title {
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--text-h3);
+  font-weight: 700;
+}
+
+.acc-dialog-body {
+  display: grid;
+  gap: var(--spacing-3);
+  font-size: var(--text-label);
+  line-height: 1.8;
+  color: var(--color-text-secondary);
+}
+
+.acc-dialog-body p {
+  margin: 0;
+}
+
+.acc-dialog-warn {
+  font-size: var(--text-caption);
+  color: var(--color-warning);
+}
+
+.acc-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-4);
+}
+
+.acc-scopes {
+  display: grid;
+  gap: var(--spacing-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.acc-scope-check {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.acc-token {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.acc-token-value {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: var(--spacing-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--text-caption);
+  word-break: break-all;
+  color: var(--color-text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .acc-goal-fill {
+    transition: none;
+  }
+}

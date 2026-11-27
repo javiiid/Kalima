@@ -26,6 +26,10 @@ from contextlib import contextmanager
 _lock = threading.RLock()
 _write_lock = threading.Lock()
 _sinks: dict[int, io.TextIOBase] = {}
+# One event callback per job buffer. Worker threads are bound to the same
+# buffer by ``ThreadPoolExecutor(initializer=bind, initargs=(sink,))``, so the
+# callback is looked up by sink identity rather than by thread id.
+_event_sinks: dict[int, object] = {}
 _installed = False
 _original_stdout: io.TextIOBase | None = None
 _original_stderr: io.TextIOBase | None = None
@@ -93,6 +97,7 @@ def uninstall() -> None:
             return
         stdout, stderr = _original_stdout, _original_stderr
         _sinks.clear()
+        _event_sinks.clear()
         _installed = False
     # Swap outside the lock: dropping the router's last reference runs its
     # ``flush``/``close``, which must not re-enter the lock we just held.
@@ -109,6 +114,35 @@ def bind(sink: io.TextIOBase) -> None:
 def unbind() -> None:
     with _lock:
         _sinks.pop(threading.get_ident(), None)
+
+
+def register_events(sink: io.TextIOBase, callback) -> None:
+    """Route ``emit_event`` calls from any thread bound to ``sink``."""
+    with _lock:
+        _event_sinks[id(sink)] = callback
+
+
+def unregister_events(sink: io.TextIOBase) -> None:
+    with _lock:
+        _event_sinks.pop(id(sink), None)
+
+
+def emit_event(event: str, message: str = "", level: str = "INFO", **data) -> None:
+    """Emit a structured job event from the current thread's job, if any.
+
+    The translator calls this from retry paths. A thread with no job binding
+    (CLI, tests) is a no-op: logging must never become a reason a translation
+    fails.
+    """
+    with _lock:
+        sink = _sinks.get(threading.get_ident())
+        callback = _event_sinks.get(id(sink)) if sink is not None else None
+    if callback is None:
+        return
+    try:
+        callback(event, message, level, data)
+    except Exception:
+        pass
 
 
 @contextmanager

@@ -26,9 +26,11 @@ import {
 } from '@/lib/preferences.ts'
 import { AppearanceTab } from './settings/AppearanceTab'
 import { DataTab } from './settings/DataTab'
+import { DiagnosticsTab } from './settings/DiagnosticsTab'
 import { GeneralTab } from './settings/GeneralTab'
 import { NotificationsTab } from './settings/NotificationsTab'
 import { ReadingTab } from './settings/ReadingTab'
+import { SystemTab } from './settings/SystemTab'
 import { TranslationTab } from './settings/TranslationTab'
 import './settings/settings.css'
 
@@ -222,6 +224,7 @@ export function SettingsPage() {
     key: tab.key,
     label: t(tab.labelKey),
     icon: <SettingsIcon name={tab.icon} size={18} />,
+    group: tab.group === 'personal' ? t('settings.group.personal') : t('settings.group.advanced'),
   }))
 
   const explicit = EXPLICIT_TABS.has(active)
@@ -274,6 +277,10 @@ export function SettingsPage() {
             registerValidate={registerValidate}
           />
         )
+      case 'diagnostics':
+        return <DiagnosticsTab isAdmin={Boolean(meta.is_admin)} />
+      case 'system':
+        return <SystemTab isAdmin={Boolean(meta.is_admin)} />
       case 'data':
         return <DataTab preferences={server} onApplied={(value) => applyValue(value, true)} />
       default:

@@ -78,12 +78,75 @@ export interface JobChunk {
 }
 
 export interface JobEvent {
+  id?: number
   job_id?: string
+  job?: {
+    id: string
+    filename: string | null
+    status: string | null
+    model: string | null
+  } | null
   level: string
+  category?: string
   event: string
   message: string
   timestamp: string
   recoverable?: boolean | number
+  data?: Record<string, unknown>
+}
+
+export interface LogQuery {
+  level?: string
+  category?: string
+  job_id?: string
+  since?: string
+  until?: string
+  q?: string
+  limit?: number
+  before_id?: number
+  scope?: 'mine' | 'all'
+}
+
+export interface LogListResponse {
+  items: JobEvent[]
+  has_more: boolean
+  next_before_id: number | null
+}
+
+export interface LogSummary {
+  total: number
+  by_level: Record<string, number>
+  by_category: Record<string, number>
+  since: string | null
+}
+
+export type SystemSettingType = 'int' | 'float' | 'bool' | 'string' | 'url' | 'model'
+
+export interface SystemSettingItem {
+  key: string
+  section: string
+  type: SystemSettingType
+  value: string | number | boolean
+  default: string | number | boolean
+  source: 'config' | 'env' | 'default'
+  editable: boolean
+  restart_required: boolean
+  read_only: boolean
+  min: number | null
+  max: number | null
+  env: string | null
+  effective?: string
+}
+
+export interface SystemSettingsResponse {
+  sections: Array<{ key: string; items: SystemSettingItem[] }>
+  meta: {
+    is_admin: boolean
+    hosted: boolean
+    config_path: string | null
+    updated_at: number | null
+    env_overrides: string[]
+  }
 }
 
 export interface JobListResponse {
@@ -417,6 +480,16 @@ export interface AccountPortal {
       open_orders: number
     }
     transactions: Transaction[]
+    /**
+     * Server-side backup facts, computed by `account_overview`. Optional
+     * because an older backend that predates the block omits it, and the page
+     * treats absence as "no backups" rather than crashing.
+     */
+    backup?: {
+      count: number
+      latest: string | null
+      latest_at: string | null
+    }
   }
   plans: PortalPlan[]
   /** Present in the response. Optional in the type because an older backend
@@ -427,13 +500,7 @@ export interface AccountPortal {
   marketplace?: MarketplaceItem[]
   orders?: unknown[]
   packages?: unknown[]
-  publisher?: {
-    books: number
-    active_projects: number
-    delivered: number
-    estimated_spend: number
-    languages?: unknown
-  }
+  publisher?: PublisherOverview
 }
 
 /**
@@ -454,6 +521,36 @@ export interface PortalApiKey {
   created_at: string
   last_used_at: string | null
   revoked_at: string | null
+}
+
+/**
+ * The one-time answer to `POST /api/account/api-keys`.
+ *
+ * `token` is the only moment the secret exists in a readable form: the server
+ * stores a SHA-256 digest and a prefix, so once this response is dismissed the
+ * value is gone. The dialog that shows it says so and offers a copy button.
+ */
+export interface CreatedApiKey {
+  id: number
+  name: string
+  token: string
+  token_prefix: string
+  scopes: string
+}
+
+/**
+ * Roll-up of a user's publishing footprint, from `publisher_overview`.
+ *
+ * `estimated_spend` is the sum of `jobs.estimated_cost` -- an estimate the
+ * translator recorded, not a billed amount. The page labels it as an estimate
+ * so it is never read as an invoice.
+ */
+export interface PublisherOverview {
+  books: number
+  active_projects: number
+  delivered: number
+  estimated_spend: number
+  languages?: Array<{ language: string; jobs: number }>
 }
 
 export type MarketplaceKind = 'glossary' | 'preset' | 'style' | string
@@ -754,6 +851,15 @@ export const api = {
   job: (id: string) => request<Job>(`/api/jobs/${encodeURIComponent(id)}`),
   jobChunks: (id: string) => request<ChunksResponse>(`/api/jobs/${encodeURIComponent(id)}/chunks`),
   jobLogs: (id: string) => request<{ items: JobEvent[] }>(`/api/jobs/${encodeURIComponent(id)}/logs`),
+  jobEvents: (id: string, params?: { order?: 'asc' | 'desc'; scope?: 'mine' | 'all' }) => {
+    const query = new URLSearchParams()
+    if (params?.order) query.set('order', params.order)
+    if (params?.scope) query.set('scope', params.scope)
+    const suffix = query.toString() ? `?${query}` : ''
+    return request<{ items: JobEvent[] }>(
+      `/api/jobs/${encodeURIComponent(id)}/events${suffix}`,
+    )
+  },
   jobAction: (id: string, action: 'stop' | 'resume' | 'cancel' | 'rescue') =>
     request<{ download?: string; message?: string }>(
       `/api/jobs/${encodeURIComponent(id)}/${action}`,
@@ -940,8 +1046,51 @@ export const api = {
 
   /* --- account ------------------------------------------------------ */
   accountPortal: () => request<AccountPortal>('/api/account/portal'),
+  /**
+   * Update the billing account's profile fields.
+   *
+   * The server validates the locale (`fa`/`en`) and requires a display name,
+   * so the page sends the whole editable row rather than a partial patch --
+   * `update_account` writes every column it owns. The response is the stored
+   * account, which is what the form resets to.
+   */
+  updateAccount: (body: {
+    display_name: string
+    email: string
+    organization: string
+    locale: 'fa' | 'en'
+  }) =>
+    request<Partial<PortalAccount> & { locale: string }>('/api/account', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   analytics: () => request<AnalyticsOverview>('/api/analytics/overview'),
-  logs: () => request<{ items: JobEvent[] }>('/api/logs'),
+  logs: (params?: LogQuery) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value === undefined || value === null || value === '') continue
+      query.set(key, String(value))
+    }
+    const suffix = query.toString() ? `?${query}` : ''
+    return request<LogListResponse>(`/api/logs${suffix}`)
+  },
+  logSummary: (params?: Pick<LogQuery, 'since' | 'job_id' | 'scope'>) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value === undefined || value === null || value === '') continue
+      query.set(key, String(value))
+    }
+    const suffix = query.toString() ? `?${query}` : ''
+    return request<LogSummary>(`/api/logs/summary${suffix}`)
+  },
+  systemSettings: () => request<SystemSettingsResponse>('/api/settings'),
+  updateSystemSettings: (patch: Record<string, string | number | boolean>) =>
+    request<SystemSettingsResponse>('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
 
   /**
    * Local password auth (`app/auth/` owns the truth). The session rides an
@@ -1035,6 +1184,29 @@ export const api = {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
     ),
 
+  /**
+   * The marketplace, optionally narrowed to one `kind`.
+   *
+   * The portal already ships the full list; this endpoint exists so the kind
+   * chips can filter on the server (and stay correct if the catalogue grows
+   * past what one page should carry). An empty `kind` means "everything".
+   */
+  accountMarketplace: (kind = '') =>
+    request<MarketplaceItem[]>(
+      `/api/account/marketplace${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`,
+    ),
+
+  /**
+   * Mint a new API key. The response carries the plaintext `token` exactly
+   * once -- see `CreatedApiKey`. The server requires a non-empty name.
+   */
+  createApiKey: (body: { name: string; scopes: string }) =>
+    request<CreatedApiKey>('/api/account/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
   /** Revoke an API key. The row stays, so the history is auditable. */
   revokeApiKey: (id: number) =>
     request<{ ok: boolean }>(`/api/account/api-keys/${id}/revoke`, {
@@ -1042,6 +1214,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     }),
+
+  /** Every translation-memory row for this user, as JSON, for an export. */
+  exportMemory: () => request<{ items: unknown[] }>('/api/memory/export'),
 
   /**
    * Store an uploaded book without translating it, and return where it landed.

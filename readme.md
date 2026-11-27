@@ -527,7 +527,9 @@ every blob forever. Download the newest backup any time from `/account`.
 | `translation.temperature` | `0.2` | Output creativity |
 | `translation.max_retries` | `5` | Retries |
 | `translation.retry_delay` | `5` | Initial retry delay |
-| `translation.max_retry_delay` | `60` | Max retry delay |
+| `translation.max_retry_delay` | `80` | Max retry delay |
+| `limits.max_upload_mb` | `1024` | Upload ceiling per book (1..4096 MB) |
+| `storage.auto_cleanup` | `false` | Delete a successful job's temp dir; `true` also removes the bilingual reader's original text |
 | `pdf.text_fastpath` | `true` | Read a text-bearing PDF locally instead of per-page vision |
 | `pdf.ocr` | `auto` | Local OCR of scans (`auto` = only when tools are installed, `on`/`off`) |
 | `pdf.ocr_language` | — | Force a Tesseract language code; otherwise derived from the source |
@@ -538,6 +540,24 @@ every blob forever. Download the newest backup any time from `/account`.
 | `pdf.max_garbage_ratio` | `0.35` | Share of symbol/control characters allowed in a page |
 | `pdf.vision_fallback` | `page` | `page` = only the problem page; `file` = phase 2 whole-file fallback |
 | `pdf.ocr_pages_threshold` | `0.3` | Scan share below which OCR runs on `--pages` only |
+
+`translation.max_retries`, `retry_delay` and `max_retry_delay` are read at the
+start of each chunk, so a change applies from the next chunk rather than only
+after a restart.
+
+### Settings & diagnostics API
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/settings` | Typed system settings, their source (`config`/`env`/`default`) and whether the caller may edit them |
+| `PUT /api/settings` | Admin-only flat `{dotted.key: value}` patch; validates type and range, returns `400` with `field` |
+| `GET /api/logs` | Newest-first job events; filters `level`, `category`, `job_id`, `since`, `until`, `q`, `limit`, `before_id`; admins may add `scope=all` |
+| `GET /api/logs/summary` | Counts by level and category for the summary cards |
+| `GET /api/jobs/{id}/events` | One job's events (`order=asc|desc`); `404` when the job is not the caller's |
+
+Log messages and structured data are redacted before they leave the server, and
+every query is scoped to the caller's jobs unless an admin explicitly asks for
+`scope=all`.
 
 ### Full example
 
@@ -561,7 +581,13 @@ translation:
   temperature: 0.2
   max_retries: 5
   retry_delay: 5
-  max_retry_delay: 60
+  max_retry_delay: 80
+
+limits:
+  max_upload_mb: 1024
+
+storage:
+  auto_cleanup: false
 
 pdf:
   text_fastpath: true    # read text-bearing PDFs locally (phase 1)
@@ -709,6 +735,16 @@ python -m app.main --input PATH [options]
 
 Persian outputs embed **Vazirmatn** fonts and handle RTL in DOCX and PDF
 (`rtl_docx.py`, `rtl_pdf.py`).
+
+For an EPUB source, `docx`, `translated_pdf` and `markdown` are rendered from
+the reassembled translated EPUB, so the book's illustrations are carried
+through. `mobile_pdf` and `bilingual_pdf` still use the text-only segment
+writer and do not include images.
+
+For a PDF source, `translated_pdf` and `bilingual_pdf` copy each source page,
+remove only its text layer, and keep images and line art; the translation is
+written over the original text area. The `docx` and `markdown` extra outputs
+from a PDF remain text-only.
 
 > 📝 SRT carries the **translated** text. For `.srt` uploads the original
 > timecodes are preserved; for books the timing is estimated from the

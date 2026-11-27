@@ -27,7 +27,11 @@ def _indexes(database, table):
 
 def test_fresh_database_has_job_events_index(tmp_path):
     database = Database(tmp_path / DB_NAME)
-    assert "idx_job_events_job_time" in _indexes(database, "job_events")
+    indexes = _indexes(database, "job_events")
+    assert "idx_job_events_job_time" in indexes
+    assert "idx_job_events_time" in indexes
+    assert "idx_job_events_level_time" in indexes
+    assert "idx_job_events_category_time" in indexes
 
 
 def test_initialize_backfills_index_on_old_database(tmp_path):

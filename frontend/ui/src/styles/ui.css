@@ -236,6 +236,16 @@
   scrollbar-width: thin;
 }
 
+.ui-tabs-group {
+  flex: none;
+  align-self: center;
+  padding-inline: var(--spacing-2);
+  font-size: var(--text-caption);
+  font-weight: 700;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
 .ui-tab {
   display: inline-flex;
   align-items: center;
@@ -280,6 +290,12 @@
   .ui-tab[aria-selected='true'] {
     /* The reading-start edge, matching the rail's own active marker. */
     box-shadow: inset -2px 0 0 0 var(--color-primary);
+  }
+
+  .ui-tabs-group {
+    align-self: stretch;
+    padding: var(--spacing-2) var(--spacing-2) var(--spacing-1);
+    border-bottom: 1px solid var(--color-border-subtle);
   }
 }
 

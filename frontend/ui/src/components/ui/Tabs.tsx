@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { Fragment, useRef } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 
 /**
@@ -7,7 +7,7 @@ import type { KeyboardEvent, ReactNode } from 'react'
  * ## Why the model is generic
  *
  * The page owns the tab keys and their labels; this component owns the
- * behaviour. That keeps the six-tab list testable as data (`settings/tabs.ts`)
+ * behaviour. That keeps the tab list testable as data (`settings/tabs.ts`)
  * while the keyboard logic stays in one place.
  *
  * ## The keyboard contract
@@ -27,6 +27,8 @@ export interface TabItem<K extends string> {
   key: K
   label: string
   icon?: ReactNode
+  /** Optional visual grouping; the keyboard order stays the flat `items` order. */
+  group?: string
 }
 
 export function tabId(idBase: string, key: string): string {
@@ -102,23 +104,30 @@ export function Tabs<K extends string>({ idBase, items, active, onChange, label 
       className="ui-tabs"
       onKeyDown={onKeyDown}
     >
-      {items.map((item) => {
+      {items.map((item, index) => {
         const selected = item.key === active
+        const showGroup = Boolean(item.group) && item.group !== items[index - 1]?.group
         return (
-          <button
-            key={item.key}
-            id={tabId(idBase, item.key)}
-            type="button"
-            role="tab"
-            aria-selected={selected}
-            aria-controls={panelId(idBase, item.key)}
-            tabIndex={selected ? 0 : -1}
-            className="ui-tab"
-            onClick={() => onChange(item.key)}
-          >
-            {item.icon}
-            {item.label}
-          </button>
+          <Fragment key={item.key}>
+            {showGroup ? (
+              <div className="ui-tabs-group" role="presentation" aria-hidden="true">
+                {item.group}
+              </div>
+            ) : null}
+            <button
+              id={tabId(idBase, item.key)}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={panelId(idBase, item.key)}
+              tabIndex={selected ? 0 : -1}
+              className="ui-tab"
+              onClick={() => onChange(item.key)}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          </Fragment>
         )
       })}
     </div>

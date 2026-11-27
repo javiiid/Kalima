@@ -387,6 +387,9 @@ def preferences_meta(user_id: int) -> dict:
             updated = stamp
     return {
         "updated_at": updated,
+        # The settings page uses this to render the System tab read-only for
+        # non-admins. It is the same first-user rule the HTTP handler uses.
+        "is_admin": int(user_id) == int(default_user_id()),
         "defaults": {
             "translation.default_model": resolve_default_model(),
         },

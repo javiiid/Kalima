@@ -89,6 +89,7 @@ export interface PreferencesPatch {
 
 export interface PreferencesMeta {
   updated_at: string | null
+  is_admin: boolean
   defaults: { 'translation.default_model': string }
   options: {
     style_presets: string[]

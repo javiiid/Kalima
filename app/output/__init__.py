@@ -10,9 +10,11 @@ DOCX, TRANSLATED_PDF, MOBILE_PDF, BILINGUAL_PDF, SRT) plus QA_REPORT data.
 """
 
 from app.output.formats import (
+    EPUB_RENDERED_OUTPUTS,
     OUTPUT_FORMATS,
     available_output_formats,
     emit_outputs,
+    generate_epub_outputs,
     generate_outputs,
     normalize_outputs,
 )
@@ -26,12 +28,14 @@ from app.output.segments import (
 )
 
 __all__ = [
+    "EPUB_RENDERED_OUTPUTS",
     "OUTPUT_FORMATS",
     "available_output_formats",
     "build_qa_report",
     "build_segments",
     "emit_outputs",
     "extract_markers",
+    "generate_epub_outputs",
     "generate_outputs",
     "normalize_outputs",
     "strip_markers",

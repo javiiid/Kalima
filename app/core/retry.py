@@ -234,6 +234,8 @@ def retry_operation(
     retryable_status_codes: Optional[Set[int]] = None,
     sleep_func: Optional[Callable] = None,
     stop_event: Optional[Event] = None,
+    on_retry: Optional[Callable] = None,
+    on_exhausted: Optional[Callable] = None,
 ):
     """
     Execute an operation with retry support.
@@ -429,6 +431,13 @@ def retry_operation(
                 "-" * 60
             )
 
+            if on_retry is not None:
+                try:
+                    on_retry(attempt, delay, exception)
+                except Exception:
+                    # Observability must never change retry behaviour.
+                    pass
+
             # ------------------------------------------------
             # Wait Before Retry
             # ------------------------------------------------
@@ -440,6 +449,12 @@ def retry_operation(
     # ========================================================
     # Retry Exhausted
     # ========================================================
+
+    if on_exhausted is not None:
+        try:
+            on_exhausted(last_exception)
+        except Exception:
+            pass
 
     raise RetryError(
         (

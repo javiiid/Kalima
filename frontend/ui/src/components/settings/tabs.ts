@@ -5,10 +5,11 @@
  * no JSX, so `node --test` can import it and assert the order, the keys and the
  * URL parsing without a DOM. The page reads this list; it does not restate it.
  *
- * The order is deliberate: general first (the least surprising), then the two
- * things that change what the product *does* (translation, reading), then the
- * two that change how it *looks* (appearance, notifications), and data last
- * because it is the only tab with destructive actions.
+ * The order is deliberate: personal settings first (general, translation,
+ * reading, appearance, notifications), then the advanced ones (diagnostics,
+ * system), and data last because it is the only tab with destructive actions.
+ * The groups are rendered as headings in the rail; the keyboard order stays
+ * this flat order.
  */
 import type { StringKey } from '../../i18n/fa.ts'
 
@@ -18,23 +19,29 @@ export type SettingsTabKey =
   | 'reading'
   | 'appearance'
   | 'notifications'
+  | 'diagnostics'
+  | 'system'
   | 'data'
 
 export type SettingsIconName = SettingsTabKey
+export type SettingsTabGroup = 'personal' | 'advanced'
 
 export interface SettingsTab {
   key: SettingsTabKey
   labelKey: StringKey
   icon: SettingsIconName
+  group: SettingsTabGroup
 }
 
 export const SETTINGS_TABS: readonly SettingsTab[] = [
-  { key: 'general', labelKey: 'settings.tab.general', icon: 'general' },
-  { key: 'translation', labelKey: 'settings.tab.translation', icon: 'translation' },
-  { key: 'reading', labelKey: 'settings.tab.reading', icon: 'reading' },
-  { key: 'appearance', labelKey: 'settings.tab.appearance', icon: 'appearance' },
-  { key: 'notifications', labelKey: 'settings.tab.notifications', icon: 'notifications' },
-  { key: 'data', labelKey: 'settings.tab.data', icon: 'data' },
+  { key: 'general', labelKey: 'settings.tab.general', icon: 'general', group: 'personal' },
+  { key: 'translation', labelKey: 'settings.tab.translation', icon: 'translation', group: 'personal' },
+  { key: 'reading', labelKey: 'settings.tab.reading', icon: 'reading', group: 'personal' },
+  { key: 'appearance', labelKey: 'settings.tab.appearance', icon: 'appearance', group: 'personal' },
+  { key: 'notifications', labelKey: 'settings.tab.notifications', icon: 'notifications', group: 'personal' },
+  { key: 'diagnostics', labelKey: 'settings.tab.diagnostics', icon: 'diagnostics', group: 'advanced' },
+  { key: 'system', labelKey: 'settings.tab.system', icon: 'system', group: 'advanced' },
+  { key: 'data', labelKey: 'settings.tab.data', icon: 'data', group: 'advanced' },
 ]
 
 export const SETTINGS_TAB_STORAGE_KEY = 'kalima-settings-tab'

@@ -260,16 +260,31 @@ def _normalise_emphasis(input_path: Path, destination: Path) -> Path:
     return target_path
 
 
-def write_epub_output(input_path: Path, path: Path, output_format: str, to_lang: str):
+def write_epub_output(
+    input_path: Path,
+    path: Path,
+    output_format: str,
+    to_lang: str,
+    language: str | None = None,
+):
     # The emphasis-normalised copy is built once and used by every branch below,
     # so the DOCX, the Markdown and the PDF all see the same text. Built inside a
     # TemporaryDirectory because it is a throwaway: it exists only to be read.
     with TemporaryDirectory(prefix="kalima-epub-") as scratch:
         normalised = _normalise_emphasis(input_path, Path(scratch))
-        return _write_with(input_path, normalised, path, output_format, to_lang)
+        return _write_with(
+            input_path, normalised, path, output_format, to_lang, language,
+        )
 
 
-def _write_with(input_path: Path, normalised: Path, path: Path, output_format: str, to_lang: str):
+def _write_with(
+    input_path: Path,
+    normalised: Path,
+    path: Path,
+    output_format: str,
+    to_lang: str,
+    language: str | None = None,
+):
     if output_format == "translated_pdf":
         html = pypandoc.convert_file(
             str(normalised), "html5", format="epub",
@@ -291,7 +306,11 @@ def _write_with(input_path: Path, normalised: Path, path: Path, output_format: s
             )
         return path
 
-    language = _epub_language(input_path, to_lang)
+    # A translated EPUB keeps the source book's ``dc:language`` because the
+    # reassembly step copies ``content.opf`` unchanged. The caller that knows
+    # the target language passes it explicitly; the conversion route leaves it
+    # unset and falls back to the book metadata.
+    language = (language or _epub_language(input_path, to_lang)).upper()
     direction = "rtl" if language in {"FA", "AR", "UR", "HE", "PS", "SD"} else "ltr"
     pypandoc.convert_file(
         str(normalised),

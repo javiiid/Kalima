@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from app.core.paths import ensure_dir
+from app.logs.categories import category_for
 
 UTC = timezone.utc
 # Canonical database file. The product was renamed to KALIMA while the file
@@ -34,7 +35,7 @@ def resolve_db_path() -> Path:
 DB_PATH = resolve_db_path()
 # Bump when the schema or any _migrate_* changes: a bump takes exactly one
 # timestamped backup BEFORE migrating. See backup_database().
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BACKUP_KEEP = 5
 BACKUP_MAX_AGE_SECONDS = 86400
 # Credits a brand-new account starts with. The account portal shows a balance
@@ -77,7 +78,7 @@ class Database:
     def initialize(self):
         schema = """
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 1, filename TEXT NOT NULL, input_path TEXT NOT NULL, filetype TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL, model TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, progress_completed INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, output_path TEXT, error TEXT, estimated_cost REAL NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS job_events (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, timestamp TEXT NOT NULL, level TEXT NOT NULL, event TEXT NOT NULL, message TEXT NOT NULL, recoverable INTEGER NOT NULL DEFAULT 1, data_json TEXT, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS job_events (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, timestamp TEXT NOT NULL, level TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'job', event TEXT NOT NULL, message TEXT NOT NULL, recoverable INTEGER NOT NULL DEFAULT 1, data_json TEXT, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS job_chunks (job_id TEXT NOT NULL, chunk_id TEXT NOT NULL, status TEXT NOT NULL, source_text TEXT, translated_text TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(job_id, chunk_id), FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, job_id TEXT, path TEXT NOT NULL, kind TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS glossaries (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, description TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(user_id, name));
@@ -93,6 +94,11 @@ class Database:
         -- job_chunks needs no twin: its PRIMARY KEY starts with job_id, so
         -- WHERE job_id=? already uses the PK's leftmost prefix.
         CREATE INDEX IF NOT EXISTS idx_job_events_job_time ON job_events(job_id, timestamp);
+        -- The diagnostics page reads across jobs, newest first, optionally
+        -- filtered by level or category. Without these, every refresh scans
+        -- the whole append-only table.
+        CREATE INDEX IF NOT EXISTS idx_job_events_time ON job_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_job_events_level_time ON job_events(level, timestamp);
         """
         with self._lock, self.connect() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -108,6 +114,7 @@ class Database:
             self._migrate_account_portal(connection)
             self._migrate_reading(connection)
             self._migrate_calibration_scope(connection)
+            self._migrate_job_events(connection)
             connection.execute("""CREATE TABLE IF NOT EXISTS book_glossaries (
                 user_id INTEGER NOT NULL DEFAULT 1,
                 book_id INTEGER NOT NULL REFERENCES library_books(id) ON DELETE CASCADE,
@@ -674,6 +681,39 @@ class Database:
         defaults = [("ادبی", "Translate naturally while preserving the author's literary voice.", .2), ("دانشگاهی", "Translate accurately with consistent academic terminology.", .1), ("فنی", "Translate precisely and preserve technical terms and formatting.", .1), ("روان", "Produce fluent, natural and accessible target-language prose.", .3)]
         connection.executemany("INSERT OR IGNORE INTO translation_profiles(user_id, name, system_prompt, temperature, preserve_html, preserve_quotes, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, ?, ?)", [(owner, name, prompt, temperature, timestamp, timestamp) for name, prompt, temperature in defaults])
 
+    @staticmethod
+    def _migrate_job_events(connection):
+        """Add ``category`` to pre-v7 databases and backfill existing rows.
+
+        The column is what makes the diagnostics filters indexable. Old rows
+        predate the prefix convention, so the backfill repeats the same rules
+        as :func:`app.logs.categories.category_for` in SQL.
+        """
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(job_events)")}
+        if "category" not in columns:
+            connection.execute(
+                "ALTER TABLE job_events ADD COLUMN category TEXT NOT NULL DEFAULT 'job'"
+            )
+            connection.execute(
+                """
+                UPDATE job_events SET category = CASE
+                    WHEN lower(event) LIKE 'api\\_%' ESCAPE '\\' THEN 'api'
+                    WHEN lower(event) LIKE 'provider\\_%' ESCAPE '\\' THEN 'api'
+                    WHEN lower(event) LIKE 'pdf\\_%' ESCAPE '\\' THEN 'pdf'
+                    WHEN lower(event) LIKE 'render\\_%' ESCAPE '\\' THEN 'pdf'
+                    WHEN lower(event) LIKE 'ocr\\_%' ESCAPE '\\' THEN 'pdf'
+                    WHEN lower(event) LIKE 'epub\\_%' ESCAPE '\\' THEN 'epub'
+                    WHEN lower(event) LIKE 'chapter\\_%' ESCAPE '\\' THEN 'epub'
+                    WHEN lower(event) LIKE 'retry\\_%' ESCAPE '\\' THEN 'retry'
+                    WHEN lower(event) IN ('job_crash', 'crash', 'unhandled_exception') THEN 'crash'
+                    ELSE 'job'
+                END
+                """
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_events_category_time ON job_events(category, timestamp)"
+        )
+
     def execute(self, sql: str, params: tuple = (), *, many: list[tuple] | None = None) -> int:
         with self._lock, self.connect() as connection:
             cursor = connection.cursor(); cursor.executemany(sql, many) if many is not None else cursor.execute(sql, params); return cursor.lastrowid or cursor.rowcount
@@ -688,7 +728,8 @@ class Database:
     def upsert_job(self, job: dict) -> None:
         self.execute("""INSERT INTO jobs(id, user_id, filename, input_path, filetype, source_language, target_language, model, mode, status, progress_completed, progress_total, created_at, updated_at, output_path, error, estimated_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, status=excluded.status, progress_completed=excluded.progress_completed, progress_total=excluded.progress_total, updated_at=excluded.updated_at, output_path=excluded.output_path, error=excluded.error""", (job["id"], int(job.get("user_id") or 1), job["filename"], job["input_path"], job["filetype"], job["source_language"], job["target_language"], job["model"], job["mode"], job["status"], job.get("progress", {}).get("completed", 0), job.get("progress", {}).get("total", 0), job["created_at"], job["updated_at"], job.get("output_path"), job.get("error"), job.get("estimated_cost", 0.0)))
 
-    def record_event(self, job_id: str | None, level: str, event: str, message: str, recoverable: bool = True, data: Any = None) -> None:
-        self.execute("INSERT INTO job_events(job_id, timestamp, level, event, message, recoverable, data_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (job_id, datetime.now(UTC).isoformat(), level, event, message, int(recoverable), json.dumps(data, ensure_ascii=False) if data is not None else None))
+    def record_event(self, job_id: str | None, level: str, event: str, message: str, recoverable: bool = True, data: Any = None, category: str | None = None) -> None:
+        resolved = category or category_for(event, data)
+        self.execute("INSERT INTO job_events(job_id, timestamp, level, category, event, message, recoverable, data_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (job_id, datetime.now(UTC).isoformat(), level, resolved, event, message, int(recoverable), json.dumps(data, ensure_ascii=False) if data is not None else None))
 
 db = Database()

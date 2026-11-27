@@ -16,10 +16,35 @@ import {
 } from '../src/components/settings/tabs.ts'
 
 describe('settings tabs', () => {
-  it('lists the six sections in the documented order', () => {
+  it('lists the eight sections in the documented order', () => {
     assert.deepEqual(
       SETTINGS_TABS.map((tab) => tab.key),
-      ['general', 'translation', 'reading', 'appearance', 'notifications', 'data'],
+      [
+        'general',
+        'translation',
+        'reading',
+        'appearance',
+        'notifications',
+        'diagnostics',
+        'system',
+        'data',
+      ],
+    )
+  })
+
+  it('groups personal settings before advanced ones', () => {
+    assert.deepEqual(
+      SETTINGS_TABS.map((tab) => tab.group),
+      [
+        'personal',
+        'personal',
+        'personal',
+        'personal',
+        'personal',
+        'advanced',
+        'advanced',
+        'advanced',
+      ],
     )
   })
 
@@ -47,6 +72,8 @@ describe('settings tabs', () => {
     assert.equal(nextSettingsTab('general', -1), 'data')
     assert.equal(nextSettingsTab('data', 1), 'general')
     assert.equal(nextSettingsTab('translation', 2), 'appearance')
+    assert.equal(nextSettingsTab('notifications', 1), 'diagnostics')
+    assert.equal(nextSettingsTab('diagnostics', -1), 'notifications')
   })
 
   it('builds a deep link for every tab', () => {

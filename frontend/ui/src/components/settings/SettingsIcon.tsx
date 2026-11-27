@@ -1,7 +1,7 @@
 import type { SettingsIconName } from './tabs'
 
 /**
- * The six tab glyphs, on the same 24px / 1.75 stroke as `NavIcon`.
+ * The settings tab glyphs, on the same 24px / 1.75 stroke as `NavIcon`.
  *
  * Inlined rather than taken from an icon package: the project ships no runtime
  * UI dependency for six outlines, and the tab list already names them in
@@ -75,6 +75,28 @@ export function SettingsIcon({ name, size = 18 }: SettingsIconProps) {
           <ellipse cx="12" cy="5" rx="9" ry="3" />
           <path d="M3 5v14a9 3 0 0 0 18 0V5" />
           <path d="M3 12a9 3 0 0 0 18 0" />
+        </>
+      ) : null}
+      {name === 'diagnostics' ? (
+        <>
+          <path d="M4 5h16" />
+          <path d="M4 12h10" />
+          <path d="M4 19h7" />
+          <circle cx="18" cy="12" r="2" />
+          <circle cx="15" cy="19" r="2" />
+        </>
+      ) : null}
+      {name === 'system' ? (
+        <>
+          <path d="M4 6h7" />
+          <path d="M15 6h5" />
+          <circle cx="13" cy="6" r="2" />
+          <path d="M4 12h3" />
+          <path d="M11 12h9" />
+          <circle cx="9" cy="12" r="2" />
+          <path d="M4 18h9" />
+          <path d="M17 18h3" />
+          <circle cx="15" cy="18" r="2" />
         </>
       ) : null}
     </svg>

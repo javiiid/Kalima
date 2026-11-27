@@ -56,6 +56,11 @@ MAX_PARALLEL_JOBS_DEFAULT = 2
 MAX_PARALLEL_JOBS_CEILING = 4
 MAX_JOBS_PER_USER_DEFAULT = 1
 
+# Upload ceiling. The old value was a literal in two request handlers; the
+# System tab needs one number both of them read.
+MAX_UPLOAD_MB_DEFAULT = 1024
+MAX_UPLOAD_MB_CEILING = 4096
+
 
 def get_scheduler_config():
     """
@@ -99,6 +104,43 @@ def get_scheduler_config():
         "max_parallel_jobs": slots,
         "max_jobs_per_user": min(per_user, slots),
     }
+
+
+def get_limits_config() -> dict:
+    """Upload limits, with defaults filled in."""
+    try:
+        config = read_config_safe()
+    except (FileNotFoundError, ValueError):
+        config = {}
+    limits = config.get("limits") or {}
+    if not isinstance(limits, dict):
+        limits = {}
+    try:
+        upload_mb = int(limits.get("max_upload_mb", MAX_UPLOAD_MB_DEFAULT))
+    except (TypeError, ValueError):
+        upload_mb = MAX_UPLOAD_MB_DEFAULT
+    upload_mb = max(1, min(upload_mb, MAX_UPLOAD_MB_CEILING))
+    return {"max_upload_mb": upload_mb}
+
+
+def get_upload_limit_bytes() -> int:
+    return get_limits_config()["max_upload_mb"] * 1024 * 1024
+
+
+def get_storage_config() -> dict:
+    """Storage behaviour. ``auto_cleanup`` is opt-in: preserving resumable
+    state was the historical behaviour and is the safer default."""
+    try:
+        config = read_config_safe()
+    except (FileNotFoundError, ValueError):
+        config = {}
+    storage = config.get("storage") or {}
+    if not isinstance(storage, dict):
+        storage = {}
+    value = storage.get("auto_cleanup", False)
+    if isinstance(value, str):
+        value = value.strip().lower() in {"1", "true", "yes", "on"}
+    return {"auto_cleanup": bool(value)}
 
 
 # ============================================================

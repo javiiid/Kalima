@@ -89,6 +89,15 @@ CONVERT_OUTPUTS = frozenset({
     "translated_pdf",
 })
 
+#: Outputs that can be rendered from an EPUB's own XHTML and media through
+#: pandoc. For an EPUB source these must be built from the reassembled EPUB,
+#: not from text-only segments, or every illustration is dropped.
+EPUB_RENDERED_OUTPUTS = frozenset({
+    "docx",
+    "translated_pdf",
+    "markdown",
+})
+
 SUFFIXES = {
     "json_segments": ".segments.json",
     "txt_bilingual": ".bilingual.txt",
@@ -428,6 +437,65 @@ def generate_outputs(
         "qa_report": qa_report,
         "flagged": flagged_count,
         "quality": quality_scorer.summary_from_segments(segments),
+    }
+
+
+def generate_epub_outputs(
+    epub_path,
+    requested,
+    output_dir,
+    base_name,
+    to_lang="",
+):
+    """Render the formats that need an EPUB's markup and media.
+
+    The text-only segment model cannot carry an image: ``build_segments``
+    flattens every chunk to plain text. So for an EPUB source the DOCX, PDF and
+    Markdown outputs are built from the reassembled EPUB with pandoc, which
+    embeds ``word/media/`` parts, page images and base64 data URIs respectively.
+
+    Returns the same shape as :func:`generate_outputs` (without QA fields,
+    which belong to the text segments).
+    """
+
+    from app.output.epub_convert import write_epub_output
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    generated = {}
+    skipped = {}
+
+    for name in normalize_outputs(requested):
+        if name not in EPUB_RENDERED_OUTPUTS:
+            skipped[name] = "not an EPUB-rendered output"
+            continue
+
+        target = output_dir / f"{base_name}{SUFFIXES[name]}"
+        try:
+            write_epub_output(
+                Path(epub_path),
+                target,
+                name,
+                to_lang,
+                language=to_lang,
+            )
+        except Exception as exc:
+            skipped[name] = f"{name} failed: {exc}"
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+
+        generated[name] = str(target)
+
+    return {
+        "generated": generated,
+        "skipped": skipped,
+        "qa_report": None,
+        "flagged": 0,
+        "quality": None,
     }
 
 

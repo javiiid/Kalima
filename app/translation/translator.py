@@ -40,7 +40,7 @@ from app.jobs.state import save_translations
 from app.jobs.state import deduplicate_chunks
 
 from app.core.paths import ensure_dir
-from app.core.job_log import bind as bind_job_log
+from app.core.job_log import bind as bind_job_log, emit_event
 from app.core.config import (
     MAX_TRANSLATION_CONCURRENCY,
     get_translation_config,
@@ -64,6 +64,36 @@ MAX_RETRIES = 5
 RETRY_BASE_SECONDS = 5.0
 
 RETRY_MAX_SECONDS = 80.0
+
+
+def _retry_settings() -> tuple[int, float, float]:
+    """Retry policy from config.yaml, with the historical constants as defaults.
+
+    ``max_retries``/``retry_delay``/``max_retry_delay`` used to be constants
+    only. Reading them here makes the System tab honest: the value it shows is
+    the value the next chunk uses.
+    """
+    try:
+        config = get_translation_config()
+    except (OSError, TypeError, ValueError):
+        config = {}
+
+    def _int(key, fallback, minimum=1):
+        try:
+            return max(minimum, int(config.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _float(key, fallback, minimum=0.0):
+        try:
+            return max(minimum, float(config.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    attempts = _int("max_retries", MAX_RETRIES)
+    base = _float("retry_delay", RETRY_BASE_SECONDS)
+    ceiling = _float("max_retry_delay", RETRY_MAX_SECONDS)
+    return attempts, base, max(base, ceiling)
 
 RETRYABLE_STATUS_CODES = {
     408,  # Request Timeout
@@ -384,7 +414,7 @@ def _print_retry_error(
     )
 
     print(
-        f"Attempts    : {MAX_RETRIES}"
+        f"Attempts    : {_retry_settings()[0]}"
     )
 
     print(
@@ -838,13 +868,34 @@ def translate_chunk(
         Run the full retry policy once on a single model.
         """
 
+        max_attempts, base_delay, max_delay = _retry_settings()
+
         translated = retry_operation(
             operation=lambda: api_operation(active_model),
-            max_attempts=MAX_RETRIES,
-            base_delay=RETRY_BASE_SECONDS,
-            max_delay=RETRY_MAX_SECONDS,
+            max_attempts=max_attempts,
+            base_delay=base_delay,
+            max_delay=max_delay,
             retryable_status_codes=tuple(
                 RETRYABLE_STATUS_CODES
+            ),
+            on_retry=lambda attempt, delay, error: emit_event(
+                "retry_scheduled",
+                f"Retry {attempt} in {delay:g}s for chunk {chunk_id}",
+                "WARNING",
+                category="retry",
+                chunk_id=str(chunk_id),
+                attempt=attempt,
+                delay=delay,
+                error=type(error).__name__,
+            ),
+            on_exhausted=lambda error: emit_event(
+                "retry_exhausted",
+                f"Retries exhausted for chunk {chunk_id}",
+                "ERROR",
+                category="retry",
+                chunk_id=str(chunk_id),
+                attempts=max_attempts,
+                error=type(error).__name__ if error is not None else None,
             ),
         )
 
@@ -887,7 +938,7 @@ def translate_chunk(
 
             print(
                 f"FALLBACK chunk {chunk_id}: {model} "
-                f"exhausted after {MAX_RETRIES} attempts "
+                f"exhausted after {_retry_settings()[0]} attempts "
                 f"-> {fallback_model} [translate_chunk]"
             )
 

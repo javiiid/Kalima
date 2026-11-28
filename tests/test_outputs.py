@@ -246,9 +246,9 @@ def test_bilingual_pdf_writer_shows_both_columns():
             assert "Book" in text
             assert "The first original sentence." in text
             assert "The first translated sentence." in text
-            assert _last_lines(document) == [
-                str(n) for n in range(1, len(document) + 1)
-            ]
+            start, numbers = _body_numbering(document)
+            assert start is not None and start >= 1
+            assert numbers == [str(n) for n in range(1, len(numbers) + 1)]
         finally:
             document.close()
 
@@ -390,9 +390,9 @@ def test_mobile_pdf_uses_phone_width_page():
             assert document.metadata.get("title") == "Book"
             fonts = {font[3] for page in document for font in page.get_fonts()}
             assert any("Vazirmatn" in name for name in fonts)
-            assert _last_lines(document) == [
-                str(n) for n in range(1, len(document) + 1)
-            ]
+            start, numbers = _body_numbering(document)
+            assert start is not None and start >= 1
+            assert numbers == [str(n) for n in range(1, len(numbers) + 1)]
         finally:
             document.close()
 
@@ -512,21 +512,21 @@ def test_translated_pdf_starts_each_chapter_on_fresh_page():
         document = fitz.open(stream=path.read_bytes(), filetype="pdf")
         try:
             assert len(document) >= 2
+            body_start, numbers = _body_numbering(document)
+            assert body_start is not None
             starts = [
                 i for i, line in enumerate(_first_lines(document))
                 if "CHAPTER-B-START" in line
             ]
             assert len(starts) == 1
-            assert starts[0] >= 1
+            assert starts[0] > body_start
             # ...and the chapter-A page(s) carry no chapter-B text.
             text_a = unicodedata.normalize(
-                "NFKC", document[0].get_text()
+                "NFKC", document[body_start].get_text()
             )
             assert "CHAPTER-B-START" not in text_a
             # Footers stay contiguous across the forced break.
-            assert _last_lines(document) == [
-                str(n) for n in range(1, len(document) + 1)
-            ]
+            assert numbers == [str(n) for n in range(1, len(numbers) + 1)]
         finally:
             document.close()
 
@@ -563,6 +563,25 @@ def _last_lines(document):
     ]
 
 
+def _body_numbering(document):
+    """``(first body page, its footer numbers)`` for a book PDF.
+
+    The cover carries no footer number and the contents page ends with
+    the last chapter's page number, so the body is identified by its
+    own numbering: the first page that says "1" and is followed by
+    2, 3, ... with nothing missing.
+    """
+
+    tails = _last_lines(document)
+    for start, tail in enumerate(tails):
+        if tail != "1":
+            continue
+        expected = [str(n) for n in range(1, len(tails) - start + 1)]
+        if tails[start:] == expected:
+            return start, tails[start:]
+    return None, []
+
+
 def test_translated_pdf_numbers_body_from_one():
     # One paragraph: newlines collapse inside <p>, so front matter
     # fills its pages with sheer word count here.
@@ -581,16 +600,12 @@ def test_translated_pdf_numbers_body_from_one():
         document = fitz.open(stream=path.read_bytes(), filetype="pdf")
         try:
             assert len(document) >= 2
-            tails = _last_lines(document)
-            first_numbered = next(
-                i for i, tail in enumerate(tails) if tail == "1"
-            )
-            # The TOC-filled front page(s) carry no footer number.
-            assert first_numbered >= 1
-            assert all(tail != "1" for tail in tails[:first_numbered])
-            assert tails[first_numbered:] == [
-                str(n) for n in range(1, len(document) - first_numbered + 1)
-            ]
+            body_start, numbers = _body_numbering(document)
+            assert body_start is not None
+            # The cover, the contents page and the front chapter carry no
+            # footer number; the body is numbered from 1.
+            assert body_start >= 1
+            assert numbers == [str(n) for n in range(1, len(numbers) + 1)]
             text = _pdf_text(document)
             assert text.count("متن") == 8
         finally:

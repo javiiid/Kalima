@@ -216,6 +216,7 @@ def run_epub_job(source: Path, out_dir: Path) -> list[tuple[str, str, Path]]:
         filetype="epub",
         title="Audit Book",
         to_lang="FA",
+        source_path=source,
     )
     epub_result = generate_epub_outputs(
         translated,
@@ -331,6 +332,10 @@ def audit_pdf(path: Path) -> dict:
             "NFKC", "".join(page.get_text() for page in document),
         )
         sample = " ".join(text.split())[:160]
+        info = document.metadata or {}
+        title = info.get("title", "")
+        first_text = " ".join(document[0].get_text().split()) if pages else ""
+        front = " ".join(page.get_text() for page in list(document)[:3])
         return {
             "pages": pages,
             "fonts": fonts,
@@ -341,7 +346,14 @@ def audit_pdf(path: Path) -> dict:
             "presentation_forms": len(_PRESENTATION.findall(text)),
             "persian_chars": len(_PERSIAN_CHARS.findall(text)),
             "text_sample": sample,
-            "metadata_title": (document.metadata or {}).get("title", ""),
+            "metadata_title": title,
+            "metadata_author": info.get("author", ""),
+            # The cover is the page that carries the book's title and no
+            # footer number; the contents page is where the chapter list
+            # lives; the outline is what a reader's PDF viewer shows.
+            "cover_page": bool(title) and title in first_text,
+            "contents_page": bool(re.search(r"\bContents\b|\u0641\u0647\u0631\u0633\u062a", front)),
+            "outline_entries": len(document.get_toc()),
         }
 
 
@@ -349,23 +361,40 @@ def audit_docx(path: Path) -> dict:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         document_xml = archive.read("word/document.xml").decode("utf-8")
+        footer_xml = (
+            archive.read("word/footer1.xml").decode("utf-8")
+            if "word/footer1.xml" in names
+            else ""
+        )
+        core_xml = (
+            archive.read("docProps/core.xml").decode("utf-8")
+            if "docProps/core.xml" in names
+            else ""
+        )
         text = " ".join(
             re.findall(r"<w:t[^>]*>(.*?)</w:t>", document_xml, re.S)
         )
+        creator = re.search(r"<dc:creator>(.*?)</dc:creator>", core_xml, re.S)
         return {
             "media": len([name for name in names if name.startswith("word/media/")]),
             "bidi": len(re.findall(r"<w:bidi\s*/>", document_xml)),
             "rtl": len(re.findall(r"<w:rtl\s*/>", document_xml)),
             "odttf": len([name for name in names if name.endswith(".odttf")]),
             "font_table": "word/fontTable.xml" in names,
+            "cover": "KalimaCoverEnd" in document_xml,
+            "footer_part": "word/footer1.xml" in names,
             "toc_field": bool(
                 re.search(r"<w:instrText[^>]*>\s*TOC", document_xml)
                 or re.search(r'<w:fldSimple[^>]*w:instr="[^"]*TOC', document_xml)
             ),
             "page_field": bool(
-                re.search(r"<w:instrText[^>]*>\s*PAGE", document_xml)
-                or re.search(r'<w:fldSimple[^>]*w:instr="[^"]*PAGE', document_xml)
+                re.search(r"<w:instrText[^>]*>\s*PAGE", footer_xml + document_xml)
+                or re.search(
+                    r'<w:fldSimple[^>]*w:instr="[^"]*PAGE',
+                    footer_xml + document_xml,
+                )
             ),
+            "creator": creator.group(1).strip() if creator else "",
             "headings": len(re.findall(r'w:pStyle w:val="Heading', document_xml)),
             "persian_chars": len(_PERSIAN_CHARS.findall(text)),
             "latin_chars": len(_LATIN_CHARS.findall(text)),
@@ -510,6 +539,17 @@ def findings(entries: list[dict]) -> list[str]:
                 "mobile_pdf", "bilingual_pdf",
             } and metrics.get("images", 0) == 0:
                 notes.append(f"{name}: EPUB images were dropped")
+            # A source-PDF overlay keeps the original pages, so it has no
+            # cover, contents or outline of its own to be missing.
+            if entry["source"] == "epub":
+                if not metrics.get("cover_page"):
+                    notes.append(f"{name}: no cover page")
+                if not metrics.get("contents_page"):
+                    notes.append(f"{name}: no contents page")
+                if not metrics.get("outline_entries"):
+                    notes.append(f"{name}: no PDF outline")
+                if not metrics.get("metadata_author"):
+                    notes.append(f"{name}: no author in the metadata")
         if entry["format"] == "docx":
             if metrics.get("persian_chars", 0) and not metrics.get("rtl"):
                 notes.append(f"{name}: Persian text but no w:rtl runs")
@@ -517,6 +557,15 @@ def findings(entries: list[dict]) -> list[str]:
                 notes.append(f"{name}: no embedded font (odttf)")
             if not metrics.get("toc_field"):
                 notes.append(f"{name}: no TOC field")
+            if not metrics.get("cover"):
+                notes.append(f"{name}: no cover page")
+            if not metrics.get("page_field"):
+                notes.append(f"{name}: no page numbers")
+            if entry["source"] == "epub" and (
+                not metrics.get("creator")
+                or metrics["creator"] == "J Book Translate"
+            ):
+                notes.append(f"{name}: creator is not the book's author")
         if entry["format"] == "translated_epub" and not metrics.get("nav_items"):
             notes.append(f"{name}: no nav/TOC entries")
     return notes
@@ -534,13 +583,18 @@ def _summary(fmt: str, metrics: dict) -> str:
         ) or "-"
         return (
             f"pages={metrics.get('pages')} images={metrics.get('images')} "
-            f"numbers={metrics.get('numbered_pages')} fonts={fonts}"
+            f"numbers={metrics.get('numbered_pages')} "
+            f"cover={metrics.get('cover_page')} "
+            f"toc={metrics.get('contents_page')} "
+            f"outline={metrics.get('outline_entries')} fonts={fonts}"
         )
     if fmt == "docx":
         return (
             f"media={metrics.get('media')} bidi={metrics.get('bidi')} "
             f"rtl={metrics.get('rtl')} odttf={metrics.get('odttf')} "
-            f"toc={metrics.get('toc_field')}"
+            f"toc={metrics.get('toc_field')} "
+            f"cover={metrics.get('cover')} "
+            f"pages={metrics.get('page_field')}"
         )
     if fmt == "translated_epub":
         return (

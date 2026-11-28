@@ -6,6 +6,7 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape
 
 from fontTools.ttLib import TTFont
 
@@ -377,6 +378,66 @@ _TOC_PAGE_BREAK = (
 )
 
 
+def _cover_end_index(body) -> int:
+    """How many leading body elements belong to the cover page.
+
+    The cover is written by ``app.output.docx`` and ends with a
+    paragraph carrying :data:`app.output.docx.COVER_END_STYLE`. The
+    table of contents must come after it, or the book opens with the
+    contents and its own title page underneath.
+    """
+
+    from app.output.docx import COVER_END_STYLE
+
+    for position, element in enumerate(list(body)):
+        style = element.find(f'{tag("pPr")}/{tag("pStyle")}')
+        if style is not None and style.get(tag("val")) == COVER_END_STYLE:
+            return position + 1
+    return 0
+
+
+#: Pandoc's own title block: a paragraph per field, each with one of
+#: these styles. They are dropped when the book's cover replaces them.
+_PANDOC_FRONT_STYLES = frozenset({"Title", "Subtitle", "Author", "Date"})
+
+
+def insert_cover(document, meta, rtl=False) -> bool:
+    """Give a document that has none the book's cover page.
+
+    The native DOCX writer draws its own cover. The EPUB route goes
+    through pandoc, which writes a title block instead -- a title, an
+    author and a date, in a different shape from the PDF's cover. This
+    inserts the same cover the native route uses (so there is one cover
+    design, not two) and drops pandoc's title block, which would
+    otherwise print the title twice.
+    """
+
+    from app.output.docx import _cover_xml
+
+    body = document.find(tag("body"))
+    if body is None or meta is None or _cover_end_index(body):
+        return False
+    while len(body):
+        first = body[0]
+        style = first.find(f'{tag("pPr")}/{tag("pStyle")}')
+        if first.tag != tag("p") or style is None:
+            break
+        if (style.get(tag("val")) or "") not in _PANDOC_FRONT_STYLES:
+            break
+        body.remove(first)
+    markup = _cover_xml(
+        getattr(meta, "title", "") or "",
+        getattr(meta, "author", "") or "",
+        rtl,
+    )
+    if not markup:
+        return False
+    wrapper = ET.fromstring(f'<w:root xmlns:w="{W}">{markup}</w:root>')
+    for offset, element in enumerate(list(wrapper)):
+        body.insert(offset, element)
+    return True
+
+
 def insert_toc_field(document) -> bool:
     """Put a table-of-contents field at the top of the document body.
 
@@ -399,8 +460,9 @@ def insert_toc_field(document) -> bool:
         ET.fromstring(template.format(w=W))
         for template in (_TOC_TITLE, _TOC_FIELD, _TOC_PAGE_BREAK)
     ]
+    start = _cover_end_index(body)
     for offset, element in enumerate(elements):
-        body.insert(offset, element)
+        body.insert(start + offset, element)
     return True
 
 
@@ -415,7 +477,142 @@ def enable_field_update(parts) -> None:
     parts["word/settings.xml"] = xml_bytes(settings)
 
 
-def fix_docx_typography(path):
+FOOTER_PART = "word/footer1.xml"
+FOOTER_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.footer+xml"
+)
+FOOTER_REL_TYPE = f"{REL}/footer"
+
+#: A centred ``PAGE`` field. Word computes it; the ``1`` between the
+#: separate and end markers is only what a reader that does not
+#: evaluate fields shows.
+_FOOTER_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    f'<w:ftr xmlns:w="{W}" xmlns:r="{REL}">'
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    '<w:r><w:t>1</w:t></w:r>'
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    "</w:p></w:ftr>"
+)
+
+
+def _add_relationship(parts, rel_type, target):
+    """Add a document relationship, returning its id (or None)."""
+
+    name = "word/_rels/document.xml.rels"
+    if name not in parts:
+        return None
+    xml = parts[name].decode("utf-8")
+    existing = re.search(
+        r'<Relationship\b[^>]*Target="' + re.escape(target) + r'"[^>]*/>', xml
+    )
+    if existing:
+        found = re.search(r'Id="([^"]+)"', existing.group(0))
+        return found.group(1) if found else None
+    numbers = [int(item) for item in re.findall(r'Id="rId(\d+)"', xml)]
+    identifier = f"rId{max(numbers, default=0) + 1}"
+    entry = (
+        f'<Relationship Id="{identifier}" Type="{rel_type}" '
+        f'Target="{target}"/>'
+    )
+    parts[name] = xml.replace(
+        "</Relationships>", entry + "</Relationships>"
+    ).encode("utf-8")
+    return identifier
+
+
+def _add_override(parts, part_name, content_type) -> None:
+    """Declare a part's content type, if it is not declared already."""
+
+    name = "[Content_Types].xml"
+    if name not in parts:
+        return
+    xml = parts[name].decode("utf-8")
+    if f'PartName="{part_name}"' in xml:
+        return
+    entry = f'<Override PartName="{part_name}" ContentType="{content_type}"/>'
+    parts[name] = xml.replace("</Types>", entry + "</Types>").encode("utf-8")
+
+
+def add_page_numbers(document, parts) -> None:
+    """Number the body pages in a centred footer.
+
+    A PDF from the same book has always had page numbers and the DOCX
+    never did, so a reader who printed a Word file had no way to refer
+    to a page. The cover is marked as a title page (``w:titlePg``),
+    which leaves it unnumbered -- a page number printed on a cover is
+    the first thing a reader sees and the last thing they want.
+    """
+
+    sections = list(document.iter(tag("sectPr")))
+    if not sections:
+        return
+    section = sections[-1]
+    if section.find(tag("footerReference")) is not None:
+        return
+    identifier = _add_relationship(parts, FOOTER_REL_TYPE, "footer1.xml")
+    if identifier is None:
+        return
+    _add_override(parts, "/" + FOOTER_PART, FOOTER_CONTENT_TYPE)
+    parts[FOOTER_PART] = _FOOTER_XML.encode("utf-8")
+    reference = ET.Element(
+        tag("footerReference"),
+        {tag("type"): "default", f"{{{REL}}}id": identifier},
+    )
+    headers = section.findall(tag("headerReference"))
+    section.insert(len(headers), reference)
+    if section.find(tag("titlePg")) is None:
+        title_page = ET.Element(tag("titlePg"))
+        margin = section.find(tag("pgMar"))
+        position = (
+            list(section).index(margin) + 1
+            if margin is not None
+            else len(section)
+        )
+        section.insert(position, title_page)
+
+
+def _set_core_field(xml, name, text):
+    pattern = re.compile(rf"<{name}>.*?</{name}>", re.S)
+    return pattern.sub(f"<{name}>{escape(text)}</{name}>", xml, count=1)
+
+
+def apply_core_properties(parts, meta) -> None:
+    """Replace the document properties with the book's own.
+
+    Every DOCX used to credit "J Book Translate" as the creator of
+    someone else's book, and the EPUB-rendered route credited pandoc.
+    The part is edited as text rather than through ElementTree so the
+    namespace prefixes Word wrote stay exactly as they are.
+    """
+
+    name = "docProps/core.xml"
+    if name not in parts or meta is None:
+        return
+    xml = parts[name].decode("utf-8")
+    title = str(getattr(meta, "title", "") or "")
+    author = str(getattr(meta, "author", "") or "")
+    subject = str(getattr(meta, "subject", "") or "")
+    keywords = getattr(meta, "keywords", ()) or ()
+    keyword_text = ", ".join(
+        str(item).strip() for item in keywords if str(item).strip()
+    )
+    if title:
+        xml = _set_core_field(xml, "dc:title", title)
+    if author:
+        xml = _set_core_field(xml, "dc:creator", author)
+    if subject:
+        xml = _set_core_field(xml, "dc:subject", subject)
+    if keyword_text:
+        xml = _set_core_field(xml, "cp:keywords", keyword_text)
+    parts[name] = xml.encode("utf-8")
+
+
+def fix_docx_typography(path, meta=None):
     with zipfile.ZipFile(path) as archive:
         parts = {name: archive.read(name) for name in archive.namelist()}
     document = ET.fromstring(parts["word/document.xml"])
@@ -443,8 +640,11 @@ def fix_docx_typography(path):
         for properties in styles_ltr.iter(tag("rPr")):
             font_properties(properties, bidi_language)
         parts["word/styles.xml"] = xml_bytes(styles_ltr)
-        if insert_toc_field(document):
-            parts["word/document.xml"] = xml_bytes(document)
+        insert_cover(document, meta, rtl=False)
+        insert_toc_field(document)
+        add_page_numbers(document, parts)
+        parts["word/document.xml"] = xml_bytes(document)
+        apply_core_properties(parts, meta)
         enable_field_update(parts)
         embed_fonts(parts)
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -488,11 +688,14 @@ def fix_docx_typography(path):
     value(paragraph_defaults, "jc", "right" if default_direction == "rtl" else "left")
     for properties in styles.iter(tag("rPr")):
         font_properties(properties, bidi_language)
+    insert_cover(document, meta, rtl_document)
     insert_toc_field(document)
+    add_page_numbers(document, parts)
     parts["word/document.xml"] = xml_bytes(document)
     parts["word/styles.xml"] = xml_bytes(styles)
     if numbering is not None:
         parts["word/numbering.xml"] = xml_bytes(numbering)
+    apply_core_properties(parts, meta)
     enable_field_update(parts)
     embed_fonts(parts)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:

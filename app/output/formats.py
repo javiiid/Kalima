@@ -181,6 +181,8 @@ def generate_outputs(
     title="",
     to_lang="",
     scorer=None,
+    source_path=None,
+    meta=None,
 ):
     """
     Generate every requested output format into ``output_dir``.
@@ -189,6 +191,12 @@ def generate_outputs(
     requested, every segment is scored before the writers run so
     that JSON_SEGMENTS carries per-segment ``quality`` and the
     ``quality_report`` file is written.
+
+    ``source_path`` is the book the segments came from. It is only
+    read for its own metadata (title, author, cover), so the PDF and
+    DOCX outputs carry the book's real bibliographic fields instead
+    of a file name. ``meta`` overrides that read when the caller
+    already has a :class:`app.output.book_meta.BookMeta`.
 
     Returns:
         dict:
@@ -216,6 +224,13 @@ def generate_outputs(
     filetype = str(filetype).lower().lstrip(".")
 
     normalized = normalize_outputs(requested)
+
+    if meta is None:
+        from app.output.book_meta import book_meta
+
+        meta = book_meta(
+            source_path, title=title, language=to_lang,
+        )
 
     if scorer is not None and "quality_report" in normalized:
         quality_scorer.score_and_attach(segments, scorer)
@@ -357,6 +372,7 @@ def generate_outputs(
                     target,
                     title=title,
                     to_lang=to_lang,
+                    meta=meta,
                 )
                 # The writer emits a clean package; direction, embedded
                 # Vazirmatn and the TOC field are added by the typography
@@ -374,6 +390,7 @@ def generate_outputs(
                     title=title,
                     to_lang=to_lang,
                     filetype=filetype,
+                    meta=meta,
                 )
 
             elif name == "mobile_pdf":
@@ -384,6 +401,7 @@ def generate_outputs(
                     title=title,
                     to_lang=to_lang,
                     filetype=filetype,
+                    meta=meta,
                 )
 
             elif name == "bilingual_pdf":
@@ -394,6 +412,7 @@ def generate_outputs(
                     title=title,
                     to_lang=to_lang,
                     filetype=filetype,
+                    meta=meta,
                 )
 
             elif name == "quality_report":
@@ -488,6 +507,7 @@ def generate_epub_outputs(
     generated = {}
     skipped = {}
     images = None
+    meta = None
 
     for name in normalize_outputs(requested):
         if name not in EPUB_RENDERED_OUTPUTS:
@@ -496,6 +516,12 @@ def generate_epub_outputs(
 
         target = output_dir / f"{base_name}{SUFFIXES[name]}"
         try:
+            if meta is None:
+                from app.output.book_meta import book_meta
+
+                meta = book_meta(
+                    epub_path, title=base_name, language=to_lang,
+                )
             if name == "bilingual_pdf":
                 if not segments:
                     skipped[name] = (
@@ -504,6 +530,8 @@ def generate_epub_outputs(
                     continue
                 if images is None:
                     images = chapter_images(epub_path)
+                from app.output.book_meta import chapter_headings
+
                 pdf.write_bilingual_pdf(
                     segments,
                     target,
@@ -511,6 +539,8 @@ def generate_epub_outputs(
                     to_lang=to_lang,
                     filetype="epub",
                     images=images,
+                    meta=meta,
+                    titles=chapter_headings(epub_path),
                 )
             else:
                 write_epub_output(
@@ -519,6 +549,7 @@ def generate_epub_outputs(
                     name,
                     to_lang,
                     language=to_lang,
+                    meta=meta,
                 )
         except Exception as exc:
             skipped[name] = f"{name} failed: {exc}"
@@ -582,6 +613,7 @@ def emit_outputs(
         title=title or Path(input_path).stem,
         to_lang=to_lang,
         scorer=scorer,
+        source_path=input_path,
     )
 
     cleaned = {

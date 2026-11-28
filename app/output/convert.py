@@ -28,6 +28,7 @@ from app.output.formats import (
     SUFFIXES,
     generate_outputs,
 )
+from app.output.book_meta import book_meta
 from app.output.typography import has_rtl, html_text
 
 # ------------------------------------------------------------------
@@ -285,6 +286,7 @@ def convert_file(
         filetype=filetype,
         title=title or input_path.stem,
         to_lang=lang,
+        source_path=input_path,
     )
     if formatted:
         from app.output.epub_convert import write_epub_output
@@ -308,6 +310,9 @@ def convert_file(
                 to_lang=lang,
                 filetype="epub",
                 images=chapter_images(input_path),
+                meta=book_meta(
+                    input_path, title=title or base_name, language=lang,
+                ),
             )
             result["generated"]["bilingual_pdf"] = str(target)
     if persian_pdf:

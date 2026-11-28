@@ -3,6 +3,7 @@ import json
 import mimetypes
 import re
 import zipfile
+from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,8 +11,9 @@ from xml.etree import ElementTree
 
 import pypandoc
 
+from app.output.book_meta import book_meta
+from app.output.html_pdf import cover_page_html, render_book
 from app.output.rtl_docx import fix_docx_typography
-from app.output.html_pdf import render_html_pdf
 from app.output.structure import CLASS_EMPHASIS
 
 #: The tags the rewrite can introduce, and the ones it must not duplicate.
@@ -260,12 +262,148 @@ def _normalise_emphasis(input_path: Path, destination: Path) -> Path:
     return target_path
 
 
+_TITLE_BLOCK_RE = re.compile(
+    r"<header[^>]*\bid\s*=\s*[\"']title-block-header[\"'][^>]*>.*?</header>",
+    re.S | re.I,
+)
+_COVER_PARA_RE = re.compile(
+    r"<p>\s*<img\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)[\"'][^>]*/?>\s*</p>", re.I,
+)
+#: An empty paragraph that exists only to carry a page anchor
+#: (``<p><span id="cover.html"></span></p>``). Removing the cover
+#: image but leaving the anchor behind prints a blank first page.
+_ANCHOR_PARA_RE = re.compile(
+    r"<p>\s*<span\b[^>]*\bid\s*=\s*[\"'][^\"']*[\"'][^>]*>\s*</span>\s*</p>",
+    re.I,
+)
+_HEADING_RE = re.compile(r"<h([1-6])\b[^>]*>(.*?)</h\1>", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+#: A heading that is the book's own table of contents, not a chapter.
+#: Listing it under the contents page this renderer draws would print
+#: "Contents ... 7" as if it were a chapter.
+_TOC_HEADINGS = frozenset({
+    "contents", "table of contents", "فهرست", "فهرست مطالب",
+})
+
+
+def _strip_front_matter(html, meta):
+    """Drop pandoc's own title page and the cover image it repeats.
+
+    ``--standalone`` makes pandoc emit a ``title-block-header`` with
+    the book's title and author, and most EPUBs put the cover image
+    as the first body paragraph. Both are re-created by the cover
+    page this renderer draws, so keeping them would print the cover
+    twice and the title three times.
+    """
+
+    html = _TITLE_BLOCK_RE.sub("", html, count=1)
+    html = _ANCHOR_PARA_RE.sub("", html)
+    cover = getattr(meta, "cover", "") or ""
+    if cover:
+        for match in _COVER_PARA_RE.finditer(html):
+            if match.group(1) == cover:
+                html = html[: match.start()] + html[match.end():]
+                break
+    return html
+
+
+def _heading_titles(html):
+    """The book's own headings, at the shallowest level that has any.
+
+    Used as the contents/outline titles for an EPUB-rendered PDF.
+    The EPUB's navigation document is not a reliable substitute: real
+    books ship TOCs that list only "Cover" and "Description", or one
+    entry per page ("صفحهٔ 1"). The headings in the rendered text are
+    exactly what the reader sees and exactly what the page lookup can
+    find, so they are the only honest source.
+    """
+
+    headings = []
+    for level, inner in _HEADING_RE.findall(html or ""):
+        text = " ".join(_html_unescape(_TAG_RE.sub(" ", inner)).split())
+        if text and text.casefold() not in _TOC_HEADINGS:
+            headings.append((int(level), text))
+    for level in (1, 2, 3):
+        titles = [text for depth, text in headings if depth == level]
+        if len(titles) >= 2:
+            return titles
+    return [text for depth, text in headings if depth == 1]
+
+
+def _write_epub_pdf(
+    input_path: Path,
+    normalised: Path,
+    path: Path,
+    output_format: str,
+    to_lang: str,
+    language: str | None,
+    meta=None,
+):
+    """Render the EPUB's own XHTML and media as a book PDF.
+
+    Chromium prints the EPUB's markup with Vazirmatn embedded; the
+    cover page, the contents page with real page numbers and the PDF
+    outline are added around it. ``mobile_pdf`` differs only in page
+    geometry and type scale.
+    """
+
+    from app.output.pdf import (
+        BODY_CSS,
+        MOBILE_CSS,
+        MOBILE_PAGE_MARGIN,
+        MOBILE_PAGE_SIZE,
+        RTL_LANGUAGES,
+    )
+
+    resolved = (language or _epub_language(input_path, to_lang)).upper()
+    rtl = resolved in RTL_LANGUAGES
+    if meta is None:
+        meta = book_meta(normalised, title=input_path.stem, language=resolved)
+    # The book is now in the target language; the source EPUB's
+    # ``dc:language`` describes the original, not this output.
+    meta.language = resolved
+
+    document = pypandoc.convert_file(
+        str(normalised), "html5", format="epub",
+        extra_args=["--standalone", "--embed-resources"], sandbox=True,
+    )
+    body = _strip_front_matter(document, meta)
+    titles = _heading_titles(body)
+    cover = cover_page_html(meta, rtl)
+
+    if output_format == "mobile_pdf":
+        return render_book(
+            body,
+            path,
+            titles=titles,
+            cover_html=cover,
+            meta=meta,
+            rtl=rtl,
+            title=meta.title,
+            page_size=MOBILE_PAGE_SIZE,
+            margin=MOBILE_PAGE_MARGIN,
+            extra_css=MOBILE_CSS,
+        )
+    return render_book(
+        body,
+        path,
+        titles=titles,
+        cover_html=cover,
+        meta=meta,
+        rtl=rtl,
+        title=meta.title,
+        extra_css=BODY_CSS,
+    )
+
+
 def write_epub_output(
     input_path: Path,
     path: Path,
     output_format: str,
     to_lang: str,
     language: str | None = None,
+    meta=None,
 ):
     # The emphasis-normalised copy is built once and used by every branch below,
     # so the DOCX, the Markdown and the PDF all see the same text. Built inside a
@@ -274,6 +412,7 @@ def write_epub_output(
         normalised = _normalise_emphasis(input_path, Path(scratch))
         return _write_with(
             input_path, normalised, path, output_format, to_lang, language,
+            meta,
         )
 
 
@@ -284,26 +423,13 @@ def _write_with(
     output_format: str,
     to_lang: str,
     language: str | None = None,
+    meta=None,
 ):
     if output_format in {"translated_pdf", "mobile_pdf"}:
-        # One renderer for both: the EPUB's own XHTML and media, printed
-        # by Chromium with Vazirmatn embedded and body pages numbered.
-        # ``mobile_pdf`` differs only in page geometry and type scale.
-        from app.output.pdf import MOBILE_CSS, MOBILE_PAGE_MARGIN, MOBILE_PAGE_SIZE
-
-        html = pypandoc.convert_file(
-            str(normalised), "html5", format="epub",
-            extra_args=["--standalone", "--embed-resources"], sandbox=True,
+        return _write_epub_pdf(
+            input_path, normalised, path, output_format, to_lang, language,
+            meta,
         )
-        if output_format == "mobile_pdf":
-            return render_html_pdf(
-                html,
-                path,
-                page_size=MOBILE_PAGE_SIZE,
-                margin=MOBILE_PAGE_MARGIN,
-                extra_css=MOBILE_CSS,
-            )
-        return render_html_pdf(html, path)
 
     if output_format == "markdown":
         with TemporaryDirectory(prefix="kalima-epub-media-") as temporary:
@@ -333,4 +459,10 @@ def _write_with(
         extra_args=["--wrap=none", f"--metadata=dir:{direction}"],
         sandbox=True,
     )
+    if output_format == "docx":
+        if meta is None:
+            meta = book_meta(
+                normalised, title=input_path.stem, language=language,
+            )
+        return fix_docx_typography(path, meta=meta)
     return fix_docx_typography(path)

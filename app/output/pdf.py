@@ -17,6 +17,8 @@ so reviewers can spot them immediately.
 from __future__ import annotations
 
 import re
+import tempfile
+import uuid
 from pathlib import Path
 
 import fitz
@@ -233,17 +235,6 @@ p.label { font-size: 8pt; color: #888888; margin-bottom: 0; }
 hr { border: none; border-top: 0.5pt solid #cccccc; margin: 8pt 0; }
 """
 
-# Same face stack as _CSS (see the font NOTE above: no Vazirmatn, no
-# bold for Arabic script). Larger body + looser leading because a
-# 360pt line holds fewer words and Persian joining needs air.
-_MOBILE_CSS = """
-body { font-family: sans-serif; font-size: 13pt; line-height: 1.9; }
-h1 { font-size: 22pt; margin-bottom: 14pt; }
-p.label { font-size: 9pt; color: #888888; margin-bottom: 0; }
-hr { border: none; border-top: 0.5pt solid #cccccc; margin: 10pt 0; }
-"""
-
-
 def _run_story(
     html,
     path,
@@ -375,6 +366,19 @@ hr { border: none; border-top: 0.5pt solid #cccccc; margin: 10pt 0; }
 figure { margin: 0 0 12pt; text-align: center; break-inside: avoid; }
 figure img { max-width: 100%; max-height: 62vh; }
 .chapter + .chapter { break-before: page; }
+.chapter-title { font-size: 17pt; margin: 0 0 12pt; break-after: avoid; }
+.cover { break-after: page; text-align: center; padding-top: 18vh; }
+.cover-image { max-width: 78%; max-height: 52vh; margin: 0 auto 18pt; display: block; }
+.cover-title { font-size: 26pt; line-height: 1.45; margin: 0 0 10pt; }
+.cover-author { font-size: 13pt; color: #444444; margin: 0 0 6pt; }
+.cover-brand { font-size: 9pt; color: #999999; letter-spacing: 0.18em; margin-top: 26pt; }
+.toc { break-after: page; }
+.toc h2 { font-size: 18pt; margin: 0 0 16pt; }
+.toc ol { list-style: none; padding: 0; margin: 0; }
+.toc li { margin: 0 0 7pt; display: flex; align-items: baseline; gap: 6pt; }
+.toc-title { flex: 0 1 auto; }
+.toc-dots { flex: 1 1 auto; border-bottom: 0.5pt dotted #bbbbbb; }
+.toc-page { flex: 0 0 auto; color: #555555; }
 """
 
 # Larger type and looser leading: a 360pt line holds fewer words and
@@ -388,6 +392,19 @@ hr { border: none; border-top: 0.5pt solid #cccccc; margin: 12pt 0; }
 figure { margin: 0 0 14pt; text-align: center; break-inside: avoid; }
 figure img { max-width: 100%; max-height: 60vh; }
 .chapter + .chapter { break-before: page; }
+.chapter-title { font-size: 18pt; margin: 0 0 14pt; break-after: avoid; }
+.cover { break-after: page; text-align: center; padding-top: 12vh; }
+.cover-image { max-width: 88%; max-height: 55vh; margin: 0 auto 16pt; display: block; }
+.cover-title { font-size: 24pt; line-height: 1.5; margin: 0 0 10pt; }
+.cover-author { font-size: 13pt; color: #444444; margin: 0 0 6pt; }
+.cover-brand { font-size: 9pt; color: #999999; letter-spacing: 0.18em; margin-top: 22pt; }
+.toc { break-after: page; }
+.toc h2 { font-size: 19pt; margin: 0 0 16pt; }
+.toc ol { list-style: none; padding: 0; margin: 0; }
+.toc li { margin: 0 0 9pt; display: flex; align-items: baseline; gap: 6pt; }
+.toc-title { flex: 0 1 auto; }
+.toc-dots { flex: 1 1 auto; border-bottom: 0.5pt dotted #bbbbbb; }
+.toc-page { flex: 0 0 auto; color: #555555; }
 """
 
 #: Page geometry for the phone output. Points, like every other
@@ -398,13 +415,6 @@ MOBILE_PAGE_MARGIN = f"{MOBILE_MARGIN}pt"
 #: Public aliases: the EPUB renderer reuses the same type scale.
 BODY_CSS = _BODY_CSS
 MOBILE_CSS = _MOBILE_CSS
-
-
-def _title_html(title, rtl):
-    if not str(title or "").strip():
-        return ""
-    direction = "rtl" if rtl else "ltr"
-    return f'<h1 dir="{direction}">{_escaped(str(title).strip())}</h1>'
 
 
 def _para_html(text, direction, flagged=False, seg_id=None):
@@ -462,6 +472,30 @@ def _figure_html(sources):
     )
 
 
+def _chapter_label(chapter, titles):
+    """A reader-facing title for a chapter, or "".
+
+    The EPUB's own navigation is the only real source of titles; the
+    fallback (:func:`chapter_title`) returns the file name for a real
+    chapter, and "chapter7.xhtml" printed above a chapter is worse
+    than no heading at all.
+    """
+
+    chapter = str(chapter or "").replace("\\", "/")
+    if not chapter:
+        return ""
+    if titles:
+        wanted = chapter.rsplit("/", 1)[-1]
+        for href, title in titles.items():
+            if str(href).replace("\\", "/").rsplit("/", 1)[-1] == wanted:
+                return str(title or "").strip()
+    label = chapter_title(chapter)
+    if label and "." in label:
+        # A file name, not a heading.
+        return ""
+    return label
+
+
 def _sections(
     items,
     start,
@@ -470,15 +504,20 @@ def _sections(
     images=None,
     bilingual=False,
     end=None,
+    titles=None,
 ):
     """Chapter sections, each one a page-break group.
 
     ``break-before: page`` lives on ``.chapter + .chapter`` in the
     stylesheet, so the first section never starts with a blank page
     and a forced break inside a chapter stays impossible.
+
+    Returns ``(sections_html, headings)`` where ``headings`` is the
+    ``(chapter, title)`` list the table of contents is built from.
     """
 
     sections = []
+    headings = []
     current = []
     seen = set()
 
@@ -492,6 +531,12 @@ def _sections(
 
         if chapter and chapter not in seen:
             seen.add(chapter)
+            label = _chapter_label(chapter, titles)
+            if label:
+                current.append(
+                    f'<h2 class="chapter-title">{_escaped(label)}</h2>'
+                )
+                headings.append((chapter, label))
             current.append(_figure_html(images_for(images, chapter)))
 
         if bilingual:
@@ -511,38 +556,97 @@ def _sections(
     if current:
         sections.append("".join(current))
 
-    return [
-        f'<section class="chapter">{section}</section>'
-        for section in sections
-    ]
+    return (
+        [
+            f'<section class="chapter">{section}</section>'
+            for section in sections
+        ],
+        headings,
+    )
 
 
-def _story_html(parts):
-    """The same content as one MuPDF story (the fallback path)."""
-
-    # The parts are separate renders in the Chromium path, so the body
-    # starts on a fresh page; the fallback has to say that explicitly.
-    return _BREAK.join(body for body, _footer in parts)
-
-
-def _render(
-    parts,
+def _write_book(
+    items,
+    body_idx,
+    breaks,
+    default_rtl,
+    images,
+    bilingual,
     path,
-    *,
     title,
-    page_size="A4",
-    margin="18mm 17mm",
-    css="",
-    fallback,
+    meta,
+    titles,
+    page_size,
+    margin,
+    css,
+    mobile=False,
 ):
-    """Chromium first; MuPDF's story engine only if it is unusable."""
+    """Render a book: cover, table of contents, numbered body, outline.
 
-    from app.output.html_pdf import render_parts
+    Two Chromium passes. The body is rendered first so its headings can
+    be located in the produced PDF -- Chromium writes no outline and
+    reports no page positions -- and the front matter is rendered
+    second, with the real page numbers in the table of contents. The
+    two are then merged and the outline and metadata are set on the
+    merged document.
+
+    Page numbers in the contents are body-relative, which is what the
+    footer prints: the cover and contents pages are unnumbered.
+    """
+
+    from app.output.book_meta import BookMeta
+    from app.output.html_pdf import (
+        contents_page_html,
+        cover_page_html,
+        render_book,
+    )
+
+    meta = meta or BookMeta()
+    meta.with_fallbacks(title=title)
+
+    body_sections, headings = _sections(
+        items, body_idx, breaks, default_rtl, images, bilingual,
+        titles=titles,
+    )
+    front_sections = []
+    if body_idx > 0:
+        front_sections, _ = _sections(
+            items, 0, set(), default_rtl, images, bilingual,
+            end=body_idx, titles=titles,
+        )
+
+    body_html = "".join(body_sections) or "<p></p>"
+    cover = cover_page_html(meta, default_rtl)
+    front_extra = "".join(front_sections)
+    names = [text for _chapter, text in headings]
+
+    def fallback():
+        html = (
+            cover
+            + contents_page_html([(text, None) for text in names], default_rtl)
+            + front_extra
+            + _BREAK
+            + body_html
+        )
+        return _run_story(
+            html,
+            path,
+            title=title,
+            page_width=MOBILE_WIDTH if mobile else PAGE_WIDTH,
+            page_height=MOBILE_HEIGHT if mobile else PAGE_HEIGHT,
+            margin=MOBILE_MARGIN if mobile else MARGIN,
+            css=_MOBILE_CSS if mobile else _CSS,
+        )
 
     try:
-        return render_parts(
-            parts,
+        return render_book(
+            body_html,
             path,
+            titles=names,
+            cover_html=cover,
+            front_extra_html=front_extra,
+            meta=meta,
+            rtl=default_rtl,
             title=title,
             page_size=page_size,
             margin=margin,
@@ -563,6 +667,8 @@ def write_translated_pdf(
     to_lang="FA",
     filetype="epub",
     images=None,
+    meta=None,
+    titles=None,
 ):
     """
     Write the TRANSLATED_PDF output as flowing text.
@@ -570,46 +676,32 @@ def write_translated_pdf(
     Segments share pages: a new page starts only when the current
     one is full, so a 300-chunk book is a book, not 300 single
     paragraphs each on their own page. Each EPUB chapter still
-    starts on a fresh page. Body pages carry footer numbers from
-    1; front matter (title, contents) is unnumbered -- the front
-    matter is a separate render, which is also what makes its
-    numbering start at 1 rather than at an offset.
+    starts on a fresh page and carries its title.
 
-    ``images`` maps a chapter name to data URIs (see
-    :func:`app.output.epub_media.chapter_images`); they are placed
-    at the start of their chapter.
+    The document opens with a cover and a table of contents; body
+    pages carry footer numbers from 1 and the PDF outline mirrors the
+    chapters. ``images`` maps a chapter to data URIs, ``titles`` maps
+    a chapter to its reader-facing title, ``meta`` carries the
+    bibliographic fields.
     """
 
     default_rtl = str(to_lang).upper() in RTL_LANGUAGES
-
     items = list(segments or [])
-    body_idx = _body_start_index(items)
-    breaks = _chapter_breaks(items, filetype)
-    heading = _title_html(title, default_rtl)
 
-    parts = []
-    if body_idx > 0:
-        front = heading + "".join(
-            _sections(
-                items, 0, set(), default_rtl, images, end=body_idx
-            )
-        )
-        parts.append((front, False))
-        body = "".join(
-            _sections(items, body_idx, breaks, default_rtl, images)
-        )
-    else:
-        body = heading + "".join(
-            _sections(items, 0, breaks, default_rtl, images)
-        )
-    parts.append((body, True))
-
-    return _render(
-        parts,
+    return _write_book(
+        items,
+        _body_start_index(items),
+        _chapter_breaks(items, filetype),
+        default_rtl,
+        images,
+        False,
         path,
-        title=title,
-        css=_BODY_CSS,
-        fallback=lambda: _run_story(_story_html(parts), path, title=title),
+        title,
+        meta,
+        titles,
+        "A4",
+        "18mm 17mm",
+        _BODY_CSS,
     )
 
 
@@ -620,57 +712,36 @@ def write_mobile_pdf(
     to_lang="FA",
     filetype="epub",
     images=None,
+    meta=None,
+    titles=None,
 ):
     """
     Write the MOBILE_PDF output: translation only on a narrow
     phone-width page (360pt) with larger type, so it reads
     fit-to-width on a phone without pinching.
 
-    Same content, fonts and direction handling as TRANSLATED_PDF;
-    only geometry and type scale differ. Numbered like the A4
-    outputs: body pages from 1, front matter unnumbered.
+    Same content, fonts, cover, contents and direction handling as
+    TRANSLATED_PDF; only geometry and type scale differ.
     """
 
     default_rtl = str(to_lang).upper() in RTL_LANGUAGES
-
     items = list(segments or [])
-    body_idx = _body_start_index(items)
-    breaks = _chapter_breaks(items, filetype)
-    heading = _title_html(title, default_rtl)
 
-    parts = []
-    if body_idx > 0:
-        front = heading + "".join(
-            _sections(
-                items, 0, set(), default_rtl, images, end=body_idx
-            )
-        )
-        parts.append((front, False))
-        body = "".join(
-            _sections(items, body_idx, breaks, default_rtl, images)
-        )
-    else:
-        body = heading + "".join(
-            _sections(items, 0, breaks, default_rtl, images)
-        )
-    parts.append((body, True))
-
-    return _render(
-        parts,
+    return _write_book(
+        items,
+        _body_start_index(items),
+        _chapter_breaks(items, filetype),
+        default_rtl,
+        images,
+        False,
         path,
-        title=title,
-        page_size=MOBILE_PAGE_SIZE,
-        margin=MOBILE_PAGE_MARGIN,
-        css=_MOBILE_CSS,
-        fallback=lambda: _run_story(
-            _story_html(parts),
-            path,
-            title=title,
-            page_width=MOBILE_WIDTH,
-            page_height=MOBILE_HEIGHT,
-            margin=MOBILE_MARGIN,
-            css=_MOBILE_CSS,
-        ),
+        title,
+        meta,
+        titles,
+        MOBILE_PAGE_SIZE,
+        MOBILE_PAGE_MARGIN,
+        _MOBILE_CSS,
+        mobile=True,
     )
 
 
@@ -681,13 +752,16 @@ def write_bilingual_pdf(
     to_lang="FA",
     filetype="epub",
     images=None,
+    meta=None,
+    titles=None,
 ):
     """
     Write the BILINGUAL_PDF output.
 
     Original and translation follow each other full-width, pair by
     pair, flowing across pages with nothing lost no matter how long
-    the book is. Each EPUB chapter starts on a fresh page.
+    the book is. Each EPUB chapter starts on a fresh page and carries
+    its title.
 
     ## Why stacked and not side-by-side
 
@@ -702,40 +776,20 @@ def write_bilingual_pdf(
     """
 
     default_rtl = str(to_lang).upper() in RTL_LANGUAGES
-
     items = list(segments or [])
-    body_idx = _body_start_index(items)
-    breaks = _chapter_breaks(items, filetype)
-    heading = _title_html(title, default_rtl)
 
-    parts = []
-    if body_idx > 0:
-        front = heading + "".join(
-            _sections(
-                items, 0, set(), default_rtl, images,
-                bilingual=True, end=body_idx,
-            )
-        )
-        parts.append((front, False))
-        body = "".join(
-            _sections(
-                items, body_idx, breaks, default_rtl, images,
-                bilingual=True,
-            )
-        )
-    else:
-        body = heading + "".join(
-            _sections(
-                items, 0, breaks, default_rtl, images, bilingual=True
-            )
-        )
-    parts.append((body, True))
-
-    return _render(
-        parts,
+    return _write_book(
+        items,
+        _body_start_index(items),
+        _chapter_breaks(items, filetype),
+        default_rtl,
+        images,
+        True,
         path,
-        title=title,
-        css=_BODY_CSS,
-        fallback=lambda: _run_story(_story_html(parts), path, title=title),
+        title,
+        meta,
+        titles,
+        "A4",
+        "18mm 17mm",
+        _BODY_CSS,
     )
-

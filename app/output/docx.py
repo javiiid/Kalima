@@ -102,6 +102,7 @@ def _paragraph_xml(
     rtl,
     flagged=False,
     heading=False,
+    center=False,
 ):
     """
     Render a single WordprocessingML paragraph.
@@ -118,6 +119,10 @@ def _paragraph_xml(
     if rtl:
 
         properties.append("<w:bidi/>")
+
+    if center:
+
+        properties.append('<w:jc w:val="center"/>')
 
     if flagged:
 
@@ -159,7 +164,36 @@ def _paragraph_xml(
     )
 
 
-def _document_xml(segments, title, rtl):
+#: The paragraph that ends the cover page. ``rtl_docx.insert_toc_field``
+#: looks for this style id to know where the table of contents goes --
+#: after the cover, before the first chapter.
+COVER_END_STYLE = "KalimaCoverEnd"
+
+
+def _cover_xml(title, author, rtl):
+    """The cover page: the book's title, its author, and a page break.
+
+    The title was already the first paragraph of the document, followed
+    immediately by the table-of-contents field, so the book opened with
+    a contents page and its own title underneath. A cover is what a
+    reader expects first, and the author was missing entirely.
+    """
+
+    if not str(title or "").strip():
+        return ""
+    body = [_paragraph_xml(title, rtl, heading=True, center=True)]
+    if str(author or "").strip():
+        body.append(_paragraph_xml(author, rtl, center=True))
+    body.append(
+        "<w:p>"
+        f'<w:pPr><w:pStyle w:val="{COVER_END_STYLE}"/></w:pPr>'
+        '<w:r><w:br w:type="page"/></w:r>'
+        "</w:p>"
+    )
+    return "".join(body)
+
+
+def _document_xml(segments, title, rtl, author=""):
     """
     Build ``word/document.xml``.
 
@@ -169,15 +203,7 @@ def _document_xml(segments, title, rtl):
     existed and was being thrown away.
     """
 
-    body = []
-
-    body.append(
-        _paragraph_xml(
-            title,
-            rtl,
-            heading=True,
-        )
-    )
+    body = [_cover_xml(title, author, rtl)]
 
     current_chapter = None
 
@@ -409,6 +435,18 @@ def _styles_xml(rtl: bool = True):
         f'<w:ind w:left="425" w:hanging="284"/>'
         f"</w:pPr>"
         f"</w:style>",
+        # The cover's closing paragraph: an empty, centred paragraph that
+        # carries the page break. Its style id is how the TOC pass finds
+        # the end of the cover (see ``rtl_docx.insert_toc_field``).
+        f'<w:style w:type="paragraph" w:styleId="{COVER_END_STYLE}">'
+        f'<w:name w:val="Kalima Cover End"/>'
+        f'<w:basedOn w:val="Normal"/>'
+        f"<w:pPr>"
+        f"{bidi}"
+        f'<w:jc w:val="center"/>'
+        f'<w:spacing w:before="0" w:after="0"/>'
+        f"</w:pPr>"
+        f"</w:style>",
         # Heading 1 through 6, so a chapter hierarchy survives and Word can build
         # a navigation pane. The writer emits the matching `w:pStyle` per level.
         "".join(
@@ -466,7 +504,7 @@ def _settings_xml():
     )
 
 
-def _core_xml(title):
+def _core_xml(title, author="", subject="", keywords=()):
     """
     Build ``docProps/core.xml``, byte-compatible with what Word itself writes.
 
@@ -487,6 +525,10 @@ def _core_xml(title):
     """
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    creator = str(author or "").strip() or "KALIMA"
+    keyword_text = ", ".join(
+        str(item).strip() for item in keywords or () if str(item).strip()
+    )
 
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\" "
@@ -495,11 +537,11 @@ def _core_xml(title):
         "<dc:title>"
         f"{escape(_clean(title))}"
         "</dc:title>"
-        "<dc:subject></dc:subject>"
-        "<dc:creator>J Book Translate</dc:creator>"
-        "<cp:keywords></cp:keywords>"
+        f"<dc:subject>{escape(_clean(subject))}</dc:subject>"
+        f"<dc:creator>{escape(_clean(creator))}</dc:creator>"
+        f"<cp:keywords>{escape(_clean(keyword_text))}</cp:keywords>"
         "<dc:description></dc:description>"
-        "<cp:lastModifiedBy>J Book Translate</cp:lastModifiedBy>"
+        "<cp:lastModifiedBy>KALIMA</cp:lastModifiedBy>"
         "<cp:revision>1</cp:revision>"
         "<dcterms:created xsi:type=\"dcterms:W3CDTF\">"
         f"{stamp}"
@@ -520,7 +562,7 @@ def _app_xml():
         "<?xml version=\"1.0\" encoding=\"UTF-8\" "
         "standalone=\"yes\"?>"
         f"<Properties {NS_APP}>"
-        "<Application>J Book Translate</Application>"
+        "<Application>KALIMA</Application>"
         "<AppVersion>1.0</AppVersion>"
         "</Properties>"
     )
@@ -531,12 +573,27 @@ def write_docx(
     path,
     title="Translated book",
     to_lang="FA",
+    meta=None,
 ):
     """
     Write the DOCX output file.
+
+    ``meta`` is a :class:`app.output.book_meta.BookMeta`; when given, its
+    title and author are the ones the cover and the document properties
+    carry. The ``title`` argument stays as the fallback for callers that
+    have no book metadata.
     """
 
     path = Path(path)
+
+    author = ""
+    subject = ""
+    keywords = ()
+    if meta is not None:
+        title = getattr(meta, "title", "") or title
+        author = getattr(meta, "author", "") or ""
+        subject = getattr(meta, "subject", "") or ""
+        keywords = getattr(meta, "keywords", ()) or ()
 
     path.parent.mkdir(
         parents=True,
@@ -556,6 +613,7 @@ def write_docx(
             segments,
             title,
             rtl,
+            author,
         ),
         "word/_rels/document.xml.rels": _document_rels_xml(),
         "word/styles.xml": _styles_xml(rtl),
@@ -566,7 +624,7 @@ def write_docx(
         # places meant the second one had to reconcile the first, and a document
         # could end up with a font table that referenced parts which were never
         # written. One writer, one font table: rtl_docx owns it.
-        "docProps/core.xml": _core_xml(title),
+        "docProps/core.xml": _core_xml(title, author, subject, keywords),
         "docProps/app.xml": _app_xml(),
     }
 

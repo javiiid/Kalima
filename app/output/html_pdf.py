@@ -29,6 +29,7 @@ fallback for machines with neither Chromium nor Edge installed.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -54,7 +55,7 @@ thead { display: table-header-group; }
 tr { break-inside: avoid; }
 img, svg { max-width: 100%; height: auto; }
 figure { break-inside: avoid; margin-inline: 0; }
-pre, code { direction: ltr; unicode-bidi: isolate; font-family: monospace !important; }
+pre, code { direction: ltr; unicode-bidi: isolate; font-family: monospace !important; font-size: 0.95em; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
 ul, ol { padding-inline-start: 1.75em; padding-inline-end: 0; }
 blockquote { margin-inline: 1.5em; }
@@ -226,6 +227,7 @@ def _escape(value):
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
+        .replace('"', "&quot;")
     )
 
 
@@ -538,3 +540,263 @@ def write_html_pdf(html, path):
     """Backward-compatible entry point (the old ``rtl_pdf`` API)."""
 
     return render_html_pdf(html, path)
+
+
+# ---------------------------------------------------------------------------
+# Book furniture: outline, metadata, page lookup
+# ---------------------------------------------------------------------------
+
+
+def _needles(title) -> list[str]:
+    """Search strings for a heading, most specific first.
+
+    Chromium writes RTL lines in visual order, so a Persian heading
+    that reads "فصل دوم." extracts as ".فصل دوم" -- the full string
+    never matches. The punctuation-stripped form does, and a long
+    heading is also tried by its first words and by its longest word.
+    """
+
+    text = " ".join(str(title or "").split())
+    if not text:
+        return []
+    stripped = text.strip(" .,;:!?\u2026\"'\u00ab\u00bb\u201c\u201d\u2018\u2019()[]-")
+    words = stripped.split()
+    candidates = [text]
+    if stripped and stripped != text:
+        candidates.append(stripped)
+    if len(text) > 40:
+        candidates.append(text[:40])
+    if len(words) > 3:
+        candidates.append(" ".join(words[:3]))
+    longest = max(
+        re.findall(r"[^\W_]{4,}", stripped) or [""], key=len, default="",
+    )
+    if longest:
+        candidates.append(longest)
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def locate_titles(pdf_path, titles) -> list:
+    """Find the 1-based page each title starts on, or ``None``.
+
+    Chromium writes no outline, and it does not say where a heading
+    landed, so the page is recovered by searching the rendered text.
+    The search is monotonic -- a title is never looked for before the
+    previous one -- which keeps a repeated word from pulling the
+    outline backwards. A title that only partially extracts (mixed
+    Persian and digits come out in visual order) is retried with a
+    prefix.
+    """
+
+    found_pages = []
+    with fitz.open(str(pdf_path)) as document:
+        cursor = 0
+        for title in titles:
+            page_number = None
+            for candidate in _needles(title):
+                for index in range(cursor, len(document)):
+                    try:
+                        hits = document[index].search_for(candidate)
+                    except Exception:  # noqa: BLE001 -- a bad needle is not fatal
+                        hits = []
+                    if hits:
+                        page_number = index + 1
+                        break
+                if page_number is not None:
+                    break
+            if page_number is not None:
+                cursor = page_number - 1
+            found_pages.append(page_number)
+    return found_pages
+
+
+def _outline_entries(outline, page_count):
+    return [
+        [int(level), str(title), int(page)]
+        for level, title, page in outline
+        if page and 1 <= int(page) <= page_count
+    ]
+
+
+def merge_pdfs(sources, target, *, outline=None, meta=None):
+    """Concatenate PDFs into ``target`` and apply the book's furniture.
+
+    ``outline`` is ``[(level, title, page)]`` with 1-based pages;
+    ``meta`` is a :class:`app.output.book_meta.BookMeta` or a plain
+    mapping with the same keys.
+    """
+
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    merged = fitz.open()
+    try:
+        for source in sources:
+            with fitz.open(str(source)) as part:
+                merged.insert_pdf(part)
+        if outline:
+            entries = _outline_entries(outline, len(merged))
+            if entries:
+                merged.set_toc(entries)
+        if meta:
+            merged.set_metadata(_metadata(meta))
+        merged.save(str(target), garbage=4, deflate=True)
+    finally:
+        merged.close()
+    return target
+
+
+def finalize_pdf(path, *, outline=None, meta=None):
+    """Set outline and metadata on an existing PDF, in place."""
+
+    path = Path(path)
+    document = fitz.open(str(path))
+    scratch = path.with_name(f"{path.stem}.finalize{path.suffix}")
+    try:
+        if outline:
+            entries = _outline_entries(outline, len(document))
+            if entries:
+                document.set_toc(entries)
+        if meta:
+            document.set_metadata(_metadata(meta))
+        document.save(str(scratch), garbage=4, deflate=True)
+    finally:
+        document.close()
+    scratch.replace(path)
+    return path
+
+
+def _metadata(meta):
+    """PDF document information from a BookMeta or a plain mapping."""
+
+    def field(name):
+        if isinstance(meta, dict):
+            return meta.get(name) or ""
+        return getattr(meta, name, "") or ""
+
+    keywords = field("keywords")
+    if isinstance(keywords, (list, tuple)):
+        keywords = ", ".join(str(item) for item in keywords if item)
+    return {
+        "title": str(field("title")),
+        "author": str(field("author")),
+        "subject": str(field("subject")),
+        "keywords": str(keywords),
+        "creator": "KALIMA",
+        "producer": "KALIMA (Chromium)",
+    }
+
+
+def cover_page_html(meta, rtl=False):
+    """The cover page: the book's own image if it has one, else type."""
+
+    direction = "rtl" if rtl else "ltr"
+    title = _escape(getattr(meta, "title", "") or "")
+    author = _escape(getattr(meta, "author", "") or "")
+    cover = getattr(meta, "cover", "") or ""
+    image = (
+        f'<img class="cover-image" src="{cover}" alt=""/>' if cover else ""
+    )
+    author_html = f'<p class="cover-author">{author}</p>' if author else ""
+    return (
+        f'<section class="cover" dir="{direction}">{image}'
+        f'<h1 class="cover-title">{title}</h1>{author_html}'
+        '<p class="cover-brand">KALIMA</p></section>'
+    )
+
+
+def contents_page_html(entries, rtl=False):
+    """The table of contents page. ``entries`` is ``[(title, page)]``."""
+
+    if not entries:
+        return ""
+    direction = "rtl" if rtl else "ltr"
+    heading = "فهرست مطالب" if rtl else "Contents"
+    rows = "".join(
+        f'<li><span class="toc-title">{_escape(title)}</span>'
+        '<span class="toc-dots"></span>'
+        f'<span class="toc-page">{page if page else ""}</span></li>'
+        for title, page in entries
+    )
+    return (
+        f'<nav class="toc" dir="{direction}">'
+        f"<h2>{heading}</h2><ol>{rows}</ol></nav>"
+    )
+
+
+def render_book(
+    body_html,
+    path,
+    *,
+    titles=(),
+    cover_html="",
+    front_extra_html="",
+    meta=None,
+    rtl=False,
+    title=None,
+    page_size="A4",
+    margin="18mm 17mm",
+    extra_css="",
+    contents_min=2,
+):
+    """Render a whole book: cover, contents with page numbers, outline.
+
+    Two Chromium passes. The body is rendered first so its headings can
+    be located in the produced PDF -- Chromium writes no outline and
+    reports no page positions -- and the front matter is rendered
+    second, with the real page numbers in the contents. The two are
+    merged and the outline and metadata are set on the merged document.
+
+    Contents page numbers are body-relative, which is what the footer
+    prints: cover and contents are unnumbered.
+    """
+
+    body_html = body_html or "<p></p>"
+    scratch = Path(tempfile.gettempdir())
+    body_pdf = scratch / f"kalima-body-{uuid.uuid4().hex}.pdf"
+    front_pdf = scratch / f"kalima-front-{uuid.uuid4().hex}.pdf"
+    try:
+        render_parts(
+            [(body_html, True)],
+            body_pdf,
+            title=title,
+            page_size=page_size,
+            margin=margin,
+            extra_css=extra_css,
+        )
+        located = locate_titles(body_pdf, list(titles)) if titles else []
+        contents = [
+            (text, located[index] if index < len(located) else None)
+            for index, text in enumerate(titles)
+        ]
+        toc = (
+            contents_page_html(contents, rtl)
+            if len(contents) >= contents_min
+            else ""
+        )
+        render_parts(
+            [(cover_html + toc + front_extra_html, False)],
+            front_pdf,
+            title=title,
+            page_size=page_size,
+            margin=margin,
+            extra_css=extra_css,
+        )
+        with fitz.open(str(front_pdf)) as front_document:
+            offset = len(front_document)
+        outline = [
+            (1, text, offset + page if page else None)
+            for text, page in contents
+        ]
+        return merge_pdfs(
+            [front_pdf, body_pdf], path, outline=outline, meta=meta,
+        )
+    finally:
+        for leftover in (body_pdf, front_pdf):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass

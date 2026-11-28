@@ -617,6 +617,7 @@ def _translate_epub(
                     filetype="epub",
                     title=input_path.stem,
                     to_lang=to_lang,
+                    source_path=input_path,
                     scorer=make_scorer(
                         text_outputs,
                         client=client,
@@ -1335,6 +1336,7 @@ def _translate_pdf(
                 filetype="pdf",
                 title=input_path.stem,
                 to_lang=to_lang,
+                source_path=input_path,
                 scorer=make_scorer(
                     output_formats,
                     client=client,

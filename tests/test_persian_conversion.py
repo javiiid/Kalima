@@ -127,10 +127,11 @@ def test_pdf_embeds_persian_fonts_without_missing_text(persian_epub, tmp_path):
         assert "\ufffd" not in text
         assert document.page_count >= 2
         # Body text only: the page-number footer lives in the bottom
-        # margin and is deliberately smaller than the body.
+        # margin and is deliberately smaller than the body, and the
+        # cover is a title page whose brand line is smaller still.
         spans = [
             span
-            for page in document
+            for page in list(document)[1:]
             for block in page.get_text("dict")["blocks"] if "lines" in block
             for line in block["lines"] for span in line["spans"]
             if span["text"].strip()

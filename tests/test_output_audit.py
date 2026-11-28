@@ -33,6 +33,11 @@ def test_output_audit_report_and_baseline(tmp_path):
     assert epub_pdf["images"] >= 1
     assert epub_pdf["has_vazirmatn"]
     assert epub_pdf["numbered_pages"] >= 1
+    # ...and the book furniture a reader looks for first.
+    assert epub_pdf["cover_page"]
+    assert epub_pdf["contents_page"]
+    assert epub_pdf["outline_entries"] >= 2
+    assert epub_pdf["metadata_author"] == "Audit Author"
 
     # EPUB -> DOCX embeds the font and marks the Persian runs RTL.
     epub_docx = entries[("epub", "docx")]["metrics"]
@@ -40,6 +45,9 @@ def test_output_audit_report_and_baseline(tmp_path):
     assert epub_docx["odttf"] >= 1
     assert epub_docx["rtl"] >= 1
     assert epub_docx["toc_field"]
+    assert epub_docx["cover"]
+    assert epub_docx["page_field"]
+    assert epub_docx["creator"] == "Audit Author"
 
     # The two PDFs built from segments keep the EPUB's pictures now: the
     # mobile one is rendered from the book's own HTML, the bilingual one
@@ -49,6 +57,9 @@ def test_output_audit_report_and_baseline(tmp_path):
         assert metrics["images"] >= 1, name
         assert metrics["has_vazirmatn"], name
         assert metrics["numbered_pages"] >= 1, name
+        assert metrics["cover_page"], name
+        assert metrics["contents_page"], name
+        assert metrics["outline_entries"] >= 2, name
 
     # The reassembled EPUB carries a rebuilt nav and both spine entries.
     translated_epub = entries[("epub", "translated_epub")]["metrics"]
@@ -69,6 +80,8 @@ def test_output_audit_report_and_baseline(tmp_path):
         assert metrics["rtl"] >= 1, source
         assert metrics["odttf"] >= 1, source
         assert metrics["toc_field"], source
+        assert metrics["cover"], source
+        assert metrics["page_field"], source
 
     # Nothing left to report: the findings list is the work queue, and it
     # is empty only when every measurement above is satisfied.

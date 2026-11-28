@@ -139,6 +139,14 @@
   --radius-badge: 999px;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* The desktop rail is icon-only until the pointer (or the keyboard) reaches
+     it. These two widths are the whole animation: the rail grows from the
+     first to the second, and the content column follows with the same
+     duration, so the two never disagree about where the rail ends. */
+  --rail-collapsed: 4.5rem;
+  --rail-expanded: 15rem;
+  --rail-duration: 240ms;
 }
 
 /* --------------------------------------------------------------------------
@@ -1307,6 +1315,131 @@
      Navigation
      A left rail, not a stack of floating cards.
      ------------------------------------------------------------------ */
+
+  /* The rail itself.
+
+     Icon-only at rest, labelled while the pointer or the keyboard is on it.
+
+     `:has(:focus-visible)` rather than `:focus-within`, and the difference is
+     the whole reason this rule is written that way: a mouse click on a nav
+     link leaves focus on that link, so `:focus-within` held the rail open for
+     the rest of the session -- the collapse stopped working the moment you
+     chose a page. `:focus-visible` is false for a click and true for Tab, so
+     the keyboard still opens it and the mouse does not pin it.
+
+     Every offset here is logical (`inline-start`/`inline-end`), so the rail
+     grows *inward* from whichever edge the writing direction puts it on --
+     rightward in RTL, leftward in LTR -- and the content column follows. */
+  .app-rail {
+    width: var(--rail-collapsed);
+    padding-inline: var(--spacing-3);
+    transition: width var(--rail-duration) var(--ease-out);
+  }
+  .app-rail:hover,
+  .app-rail:has(:focus-visible) {
+    width: var(--rail-expanded);
+  }
+
+  /* A row of `icon | label` where the label's *track* is what collapses.
+
+     This was a flex row, and flex is the wrong tool here: `justify-content:
+     center` centres the pair, and a label that has shrunk to "almost nothing"
+     still counts as something, so the icon sat a few pixels left of the rail's
+     centre line while the tool buttons below it sat exactly on it. Three
+     columns of icons, three different centre lines.
+
+     `grid-template-columns: auto 0fr` makes the label's track exactly zero
+     wide, so the icon is the only thing in the row and `justify-content`
+     centres it for real. Going to `auto 1fr` on hover is the same 0fr -> 1fr
+     trick `.collapsible` uses: the track animates, nothing is guessed, and the
+     icon never moves. */
+  .app-rail-brand,
+  .app-rail-item {
+    display: grid;
+    grid-template-columns: auto 0fr;
+    align-items: center;
+    justify-content: center;
+    column-gap: 0;
+    transition:
+      grid-template-columns var(--rail-duration) var(--ease-out),
+      column-gap var(--rail-duration) var(--ease-out);
+  }
+  .app-rail:hover .app-rail-brand,
+  .app-rail:has(:focus-visible) .app-rail-brand {
+    grid-template-columns: auto 1fr;
+    column-gap: var(--spacing-3);
+  }
+  .app-rail:hover .app-rail-item,
+  .app-rail:has(:focus-visible) .app-rail-item {
+    grid-template-columns: auto 1fr;
+    column-gap: 0.625rem;
+  }
+
+  /* A label that collapses to nothing without leaving the accessibility tree:
+     `overflow: hidden` plus `min-width: 0` lets its grid track close to zero,
+     and unlike `display: none` it is still announced. The fade is delayed past
+     the first frame of the width transition so the text does not appear
+     squashed in a rail that is still opening. */
+  .app-rail-label {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 120ms var(--ease-out);
+  }
+  .app-rail:hover .app-rail-label,
+  .app-rail:has(:focus-visible) .app-rail-label {
+    opacity: 1;
+    transition-delay: 110ms;
+  }
+
+  /* The tool pill is horizontal when the rail is open and a vertical stack
+     when it is closed: three 40px controls do not fit across 72px. The
+     language pill loses its text for the same reason -- the globe alone is
+     the control, and its `aria-label` still names it. */
+  .app-rail:not(:hover):not(:has(:focus-visible)) .app-rail-tools {
+    flex-direction: column;
+  }
+  .app-rail:not(:hover):not(:has(:focus-visible)) .app-rail-tools .tool-divider {
+    width: auto;
+    height: 1px;
+    align-self: stretch;
+    margin-block: 0;
+    margin-inline: 7px;
+  }
+  .app-rail:not(:hover):not(:has(:focus-visible)) .btn-lang {
+    width: 40px;
+    padding-inline: 0;
+    border-radius: 50%;
+    justify-content: center;
+  }
+  .app-rail:not(:hover):not(:has(:focus-visible)) .btn-lang > span {
+    display: none;
+  }
+
+  /* The content column tracks the rail's width, with the same duration and
+     easing, so the page does not jump a frame behind the rail. */
+  .app-content {
+    transition: margin-inline-end var(--rail-duration) var(--ease-out);
+  }
+  @media (min-width: 64rem) {
+    .app-content {
+      margin-inline-end: var(--rail-collapsed);
+    }
+    .app-rail:hover ~ .app-content,
+    .app-rail:has(:focus-visible) ~ .app-content {
+      margin-inline-end: var(--rail-expanded);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .app-rail,
+    .app-content,
+    .app-rail-label {
+      transition: none;
+    }
+  }
+
   .tab-list {
     display: flex;
     gap: var(--spacing-6);

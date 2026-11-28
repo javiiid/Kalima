@@ -121,15 +121,23 @@ describe('the gutter has one owner', () => {
   it('the shell no longer sets a horizontal gutter', () => {
     // It owns the rail offset and the bar's height. The gutter belongs to the
     // page, and `pe-6` here is what made it asymmetric.
-    const content = /<div\s+className="([^"]*me-0[^"]*)"/.exec(shell)?.[1] ?? ''
+    const content = /<div\s+className="([^"]*app-content[^"]*)"/.exec(shell)?.[1] ?? ''
     assert.ok(content, 'could not find the content wrapper in AppShell')
     assert.ok(
       !/\b(?:p|px|ps|pe)-/.test(content),
       `AppShell still sets a horizontal gutter -- "${content}"`,
     )
+    // The rail offset is no longer a Tailwind constant. The rail is 72px at
+    // rest and 240px while it is hovered or focused, so the content column has
+    // to move with it -- one number in two places would drift apart on the
+    // first change. Both live in tokens.css, next to the widths themselves.
     assert.ok(
-      /lg:me-60/.test(content),
-      'AppShell no longer offsets for the rail above lg',
+      /\.app-content\s*\{[^}]*margin-inline-end:\s*var\(--rail-collapsed\)/.test(css),
+      'the content column no longer clears the collapsed rail',
+    )
+    assert.ok(
+      /\.app-rail:hover ~ \.app-content,[^}]*margin-inline-end:\s*var\(--rail-expanded\)/.test(css),
+      'the content column does not follow the rail when it opens',
     )
   })
 })

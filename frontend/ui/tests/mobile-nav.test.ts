@@ -209,6 +209,79 @@ describe('both navigations are in the tree, one of them hidden', () => {
   })
 })
 
+describe('the rail opens on hover, and on keyboard focus', () => {
+  const css = readFileSync(new URL('../src/styles/tokens.css', import.meta.url), 'utf8')
+  const shell = readFileSync(new URL('../src/components/AppShell.tsx', import.meta.url), 'utf8')
+
+  it('is icon-only until the pointer or the keyboard reaches it', () => {
+    assert.ok(/--rail-collapsed:\s*[\d.]+rem/.test(css), 'the collapsed width is not a token')
+    assert.ok(/--rail-expanded:\s*[\d.]+rem/.test(css), 'the open width is not a token')
+    assert.ok(
+      /\.app-rail:hover,\s*\.app-rail:has\(:focus-visible\)\s*\{[^}]*width:\s*var\(--rail-expanded\)/.test(css),
+      'the rail does not widen on hover and focus',
+    )
+  })
+
+  it('does not pin itself open after a click', () => {
+    // `:focus-within` was the first version, and it broke the collapse: a
+    // mouse click on a nav link leaves focus on that link, so the rail stayed
+    // open for the rest of the session once a page had been chosen.
+    // `:focus-visible` is false for a click and true for Tab.
+    assert.ok(
+      !/\.app-rail[^\n{]*:focus-within/.test(css),
+      'the rail still uses :focus-within, so a click pins it open',
+    )
+    assert.ok(
+      /\.app-rail:has\(:focus-visible\)/.test(css),
+      'the rail does not open for a keyboard user',
+    )
+  })
+
+  it('lines the icons up in one column when it is closed', () => {
+    // This was a flex row, and a label that has shrunk to *almost* nothing
+    // still counts as something: the icon sat a few pixels off the rail's
+    // centre line while the tool buttons below it sat exactly on it. The row is
+    // a grid now, and the label's track is exactly zero wide when closed.
+    const row = /\.app-rail-brand,\s*\.app-rail-item\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    assert.ok(row, 'the rail rows are not declared together')
+    assert.ok(
+      /grid-template-columns:\s*auto 0fr/.test(row),
+      'the label track is not zero-width when the rail is closed',
+    )
+    assert.ok(/column-gap:\s*0/.test(row), 'the row keeps a gap when the rail is closed')
+    // And no Tailwind gap utility on either element: utilities sit in a later
+    // cascade layer than the components layer, so one would win silently.
+    assert.ok(!/gap-2\.5/.test(shell), 'a gap utility on the nav item overrides the rail CSS')
+    assert.ok(
+      !/gap-\[var\(--spacing-3\)\]/.test(shell),
+      'a gap utility on the brand overrides the rail CSS',
+    )
+    // Same trap for `display`: a `flex` utility would beat `display: grid`
+    // from the components layer and quietly bring the misalignment back.
+    assert.ok(
+      !/className="app-rail-brand[^"]*\bflex\b/.test(shell),
+      'a flex utility on the brand overrides the grid row',
+    )
+    assert.ok(
+      !/className="app-rail-item[^"]*\bflex\b/.test(shell),
+      'a flex utility on the nav item overrides the grid row',
+    )
+  })
+
+  it('keeps the labels in the accessibility tree while they are collapsed', () => {
+    // `display: none` would be the easy way to hide the labels, and it would
+    // also delete the only text a screen reader has for a rail of icons.
+    assert.ok(
+      /\.app-rail-label\s*\{[^}]*overflow:\s*hidden/.test(css),
+      'the collapsed label is not clipped with overflow',
+    )
+    assert.ok(
+      !/\.app-rail-label\s*\{[^}]*display:\s*none/.test(css),
+      'the collapsed label is display:none, so it disappears from the a11y tree',
+    )
+  })
+})
+
 describe('the rail has no dead-end reader button', () => {
   it('bare /reader is not a destination', () => {
     // Bare `/reader` names no book and renders NotFound, so a rail button to

@@ -221,16 +221,16 @@ export function Sidebar() {
   const { t } = useLanguage()
   return (
     <aside
-      className="fixed inset-y-0 end-0 z-40 hidden w-60 flex-col border-s bg-[var(--color-surface)] pe-4 ps-3 lg:flex"
+      className="app-rail fixed inset-y-0 end-0 z-40 hidden flex-col border-s bg-[var(--color-surface)] lg:flex"
       style={{ borderColor: 'var(--color-border)' }}
       aria-label={t('shell.mainNav')}
     >
       <div
-        className="flex items-center gap-[var(--spacing-3)] py-4 pe-1"
+        className="app-rail-brand py-4"
         style={{ borderBottom: '1px solid var(--color-border)' }}
       >
         <KalimaMark size={34} />
-        <span className="min-w-0">
+        <span className="app-rail-label">
           <strong className="block truncate text-[length:var(--text-small)] tracking-wide" style={{ color: 'var(--color-text-primary)' }}>
             KALIMA
           </strong>
@@ -245,7 +245,7 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
-            className="relative flex items-center gap-2.5 rounded-[var(--radius-control)] px-3 py-2.5 text-[length:var(--text-label)] font-semibold"
+            className="app-rail-item relative rounded-[var(--radius-control)] px-3 py-2.5 text-[length:var(--text-label)] font-semibold"
             style={({ isActive }) => ({
               color: isActive ? 'var(--color-text-brand)' : 'var(--color-text-secondary)',
               background: isActive ? 'var(--color-primary-subtle)' : 'transparent',
@@ -257,7 +257,7 @@ export function Sidebar() {
             <span className="flex flex-none items-center justify-center" aria-hidden="true">
               <NavIcon name={icon} size={18} />
             </span>
-            {t(`nav.${key}` as StringKey)}
+            <span className="app-rail-label">{t(`nav.${key}` as StringKey)}</span>
           </NavLink>
         ))}
       </nav>
@@ -265,7 +265,7 @@ export function Sidebar() {
       {/* View preferences sit at the bottom of the rail, centered -- clear
           of the navigation above and easy to find in one fixed spot. */}
       <div className="mt-auto flex justify-center pb-3">
-        <span className="tool-cluster">
+        <span className="tool-cluster app-rail-tools">
           <NavLink
             to="/settings"
             aria-label={t('nav.settings')}
@@ -318,12 +318,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         `.page` -- it used to be `pe-6` here, so the horizontal padding lived in
         this file while the vertical lived in each page, and only on one side.
 
-        `lg:me-60` clears the rail and `lg:pb-0` gives the bar's space back once
-        the bar is not rendered. Without it every desktop page carries dead
-        space at the bottom for a bar that is not there.
+        `.app-content` clears the rail -- at its collapsed width, then at its
+        open width while the rail is hovered or focused, both from tokens.css
+        so the two widths animate together. `lg:pb-0` gives the bar's space
+        back once the bar is not rendered. Without it every desktop page
+        carries dead space at the bottom for a bar that is not there.
       */}
       <div
-        className="me-0 pb-[calc(var(--mobile-nav-height)+env(safe-area-inset-bottom,0px))] focus:outline-none lg:me-60 lg:pb-0"
+        className="app-content pb-[calc(var(--mobile-nav-height)+env(safe-area-inset-bottom,0px))] focus:outline-none lg:pb-0"
         id="content"
         tabIndex={-1}
       >

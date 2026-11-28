@@ -317,6 +317,13 @@ class PDFHandler:
 
         # Compress the PDF using Ghostscript
         PDFHandler.compress_pdf(temp_pdf_path, output_pdf_path)
+        # The uncompressed copy is a full-size duplicate. Leaving it in the
+        # user's output directory doubled storage for every PDF-source job
+        # (and the audit found one next to every translated.pdf).
+        try:
+            temp_pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     @staticmethod
     def save_bilingual_pdf(
@@ -397,6 +404,10 @@ class PDFHandler:
 
         # Compress the PDF using Ghostscript
         PDFHandler.compress_pdf(temp_pdf_path, output_pdf_path)
+        try:
+            temp_pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     @staticmethod
     def transcribe_pdf(client, input_pdf_path, paths, dpi=150, batch=False, model=None, pages=None):

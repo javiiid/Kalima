@@ -98,3 +98,27 @@ def test_bilingual_pdf_keeps_images_on_translated_pages(tmp_path):
         assert document[0].get_images()
         assert document[1].get_images()
         assert "TRANSLATED ONE" in document[1].get_text()
+
+
+def test_pdf_source_outputs_leave_no_temp_copy(tmp_path):
+    """The uncompressed ``.temp.pdf`` duplicate must not survive the job."""
+    source = _make_pdf(tmp_path / "source.pdf")
+    chunks, chapter_map, _contexts = build_chunks(source)
+
+    translated = tmp_path / "translated.pdf"
+    PDFHandler.save_translated_pdf(
+        _translations(chunks),
+        translated,
+        original_pdf_path=source,
+        chapter_map=chapter_map,
+    )
+    bilingual = tmp_path / "bilingual.pdf"
+    PDFHandler.save_bilingual_pdf(
+        source,
+        _translations(chunks),
+        bilingual,
+        chapter_map=chapter_map,
+    )
+
+    assert not (tmp_path / "translated.temp.pdf").exists()
+    assert not (tmp_path / "bilingual.temp.pdf").exists()

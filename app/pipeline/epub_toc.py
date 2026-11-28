@@ -192,7 +192,15 @@ def _build_opf(
         f'media-type="application/xhtml+xml" properties="nav"/>'
     ]
     for chapter in chapters:
-        href = _relpath(opf_base, chapter["path"]).replace("\\", "/")
+        # ``opf_base`` is a *directory* (``OPS``), not a file, so ``_relpath``
+        # -- which strips a dirname -- doubled the prefix: an OPF at
+        # ``OPS/book.opf`` produced ``OPS/OPS/chapter1.xhtml``. Pandoc then
+        # refused the whole book ("No entry on path"), and readers would too.
+        # A manifest href is relative to the OPF's own directory.
+        href = (
+            posixpath.relpath(chapter["path"], opf_base)
+            if opf_base else chapter["path"]
+        ).replace("\\", "/")
         manifest_lines.append(
             f'<item id="{chapter["id"]}" href="{escape(href, quote=True)}" '
             f'media-type="application/xhtml+xml"/>'
@@ -233,6 +241,12 @@ def rebuild_epub_structure(input_epub_path: str, output_epub_path: str) -> None:
     ``output_epub_path``. When both paths are identical the replacement is
     atomic (temp file + ``os.replace``).
     """
+    # Callers pass ``Path`` objects (the job pipeline does), and the in-place
+    # branch below builds a sidecar name with ``+``. A ``Path + str`` raises
+    # ``TypeError``, which ``reassemble_translation`` swallows as a warning --
+    # so the real job path silently shipped a stale TOC. Coerce once here.
+    input_epub_path = str(input_epub_path)
+    output_epub_path = str(output_epub_path)
     in_place = os.path.abspath(input_epub_path) == os.path.abspath(output_epub_path)
     target_path = output_epub_path if not in_place else output_epub_path + ".rebuild-tmp"
 

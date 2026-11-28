@@ -125,6 +125,42 @@ def test_in_place_rebuild(tmp_path):
     assert "Chapter One" in after
 
 
+def test_manifest_hrefs_are_relative_to_the_opf_directory(tmp_path):
+    """An OPF inside ``OEBPS/`` must not produce ``OEBPS/OEBPS/ch0.xhtml``.
+
+    Pandoc (and every reader) resolves a manifest href against the OPF's own
+    directory. The old writer used a helper that stripped a *file* dirname,
+    so the prefix doubled and the rebuilt EPUB was unreadable.
+    """
+    src = tmp_path / "src.epub"
+    out = tmp_path / "out.epub"
+    _write_epub(
+        src,
+        [
+            ("Chapter One", "<html><body><h1>Chapter One</h1><p>x</p></body></html>"),
+            ("Chapter Two", "<html><body><h1>Chapter Two</h1><p>y</p></body></html>"),
+        ],
+    )
+    rebuild_epub_structure(str(src), str(out))
+
+    opf = _read(out, "OEBPS/content.opf")
+    assert '<item id="ch-0" href="ch0.xhtml"' in opf
+    assert '<item id="ch-1" href="ch1.xhtml"' in opf
+    assert "OEBPS/ch0.xhtml" not in opf
+    assert "OEBPS/OEBPS" not in opf
+
+
+def test_rebuild_accepts_path_objects_in_place(tmp_path):
+    """The job pipeline passes ``Path`` objects; ``Path + str`` used to raise."""
+    src = tmp_path / "book.epub"
+    _write_epub(
+        src,
+        [("Chapter One", "<html><body><h1>Chapter One</h1><p>x</p></body></html>")],
+    )
+    rebuild_epub_structure(src, src)
+    assert "Old Title" not in _read(src, "OEBPS/nav.xhtml")
+
+
 def test_in_place_failure_keeps_original_and_cleans_temp(tmp_path, monkeypatch):
     from app.pipeline import epub_toc
 

@@ -252,6 +252,28 @@ def ocr_available(language: str = DEFAULT_OCR_LANGUAGE, work_dir=None) -> dict:
         info["reason"] = "ocrmypdf executable not found"
         return info
 
+    # A file on PATH is not a working OCRmyPDF. A stale shim -- or a
+    # launcher whose Python environment lost the package -- passes the
+    # ``is_file`` check and then fails on every page, so the guard said
+    # "available" and the job died mid-book. Ask it to identify itself.
+    try:
+        probe = subprocess.run(
+            [str(exe), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        info["reason"] = f"ocrmypdf is not runnable: {exc}"
+        return info
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        info["reason"] = (
+            "ocrmypdf is not runnable: "
+            + (detail[-1] if detail else f"exit {probe.returncode}")
+        )
+        return info
+
     try:
         helpers = _tesseract_helpers()
         tesseract = helpers.tesseract_path()

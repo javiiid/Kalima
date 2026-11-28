@@ -290,11 +290,17 @@ def test_translated_pdf_flows_many_segments_onto_few_pages():
             assert 1 < len(document) < len(segments)
             text = _pdf_text(document)
             assert "Book" in text
-            for i in (0, 30, 59):
-                assert f"شماره {i}" in text
+            # Every segment survived. Counted per word rather than by
+            # matching "شماره 5": Chromium writes an RTL line in visual
+            # order, so a digit between two Persian words extracts next
+            # to the wrong neighbour (the glyphs are all there and the
+            # page renders correctly -- see the note in
+            # ``app/output/html_pdf.py``).
+            assert text.count("متن") == 60
+            assert "شماره" in text
             assert document.metadata.get("title") == "Book"
             fonts = {font[3] for page in document for font in page.get_fonts()}
-            assert any("Naskh" in name for name in fonts)
+            assert any("Vazirmatn" in name for name in fonts)
         finally:
             document.close()
 
@@ -311,7 +317,7 @@ def test_bilingual_pdf_flows_and_loses_no_pairs():
             text = _pdf_text(document)
             for i in (0, 20, 39):
                 assert f"number {i}" in text
-                assert f"شماره {i}" in text
+            assert text.count("متن") == 40
         finally:
             document.close()
 
@@ -344,7 +350,7 @@ def test_bilingual_pdf_keeps_long_pairs_without_clipping():
             for i in range(8):
                 for p in (0, 15, 29):
                     assert f"Source paragraph {i}-{p}" in text, (i, p)
-                assert f"شماره {i}" in text
+            assert text.count("متن") == 8
         finally:
             document.close()
 
@@ -377,14 +383,13 @@ def test_mobile_pdf_uses_phone_width_page():
         try:
             assert 1 < len(document) < len(segments)
             for page in document:
-                assert page.rect.width == 360
+                assert abs(page.rect.width - 360) < 1
             text = _pdf_text(document)
             assert "Book" in text
-            for i in (0, 30, 59):
-                assert f"شماره {i}" in text
+            assert text.count("متن") == 60
             assert document.metadata.get("title") == "Book"
             fonts = {font[3] for page in document for font in page.get_fonts()}
-            assert any("Naskh" in name for name in fonts)
+            assert any("Vazirmatn" in name for name in fonts)
             assert _last_lines(document) == [
                 str(n) for n in range(1, len(document) + 1)
             ]
@@ -587,8 +592,7 @@ def test_translated_pdf_numbers_body_from_one():
                 str(n) for n in range(1, len(document) - first_numbered + 1)
             ]
             text = _pdf_text(document)
-            for i in range(1, 9):
-                assert f"شماره {i}" in text
+            assert text.count("متن") == 8
         finally:
             document.close()
 

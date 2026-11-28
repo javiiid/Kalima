@@ -186,9 +186,12 @@ def _segments():
     }]
 
 
-def _write(lang, tmp_path):
+def _write(lang, tmp_path, target=None):
+    segments = _segments()
+    if target is not None:
+        segments[0]["target"] = target
     result = generate_outputs(
-        _segments(),
+        segments,
         requested=["docx", "markdown"],
         output_dir=tmp_path,
         base_name="book",
@@ -200,19 +203,50 @@ def _write(lang, tmp_path):
 
 
 def _bidi_paragraph_count(docx_path: Path) -> int:
+    from xml.etree import ElementTree as ET
+
     with zipfile.ZipFile(docx_path) as archive:
-        xml = archive.read("word/document.xml").decode("utf-8")
-    # <w:bidi/> also sits in the unconditional default styles, so count the
-    # paragraph-level property that the writer adds only when rtl is true.
-    return xml.count("<w:pPr><w:bidi/></w:pPr>")
+        root = ET.fromstring(archive.read("word/document.xml"))
+    namespace = {
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    }
+    # Parsed, not string-matched: the typography pass re-serialises the
+    # document with the schema's property order, so the literal
+    # "<w:pPr><w:bidi/></w:pPr>" the old check counted no longer occurs
+    # even though the property is there.
+    return sum(
+        1
+        for paragraph in root.iter(f"{{{namespace['w']}}}p")
+        if paragraph.find("w:pPr/w:bidi", namespace) is not None
+    )
 
 
 def test_rtl_target_produces_bidi_paragraphs(tmp_path):
     fa_files = _write("FA", tmp_path / "fa")
-    en_files = _write("EN", tmp_path / "en")
+    # The target text follows the target language here: the typography pass
+    # decides direction from the document's own text, so an "EN" document
+    # that still carries Persian text is legitimately laid out RTL.
+    en_files = _write(
+        "EN", tmp_path / "en", target="This is an English sentence."
+    )
     fa_count = _bidi_paragraph_count(fa_files["docx"])
     en_count = _bidi_paragraph_count(en_files["docx"])
     assert fa_count > en_count, f"FA produced {fa_count} bidi paragraphs, EN produced {en_count}"
+
+
+def test_docx_writer_honours_to_lang(tmp_path):
+    """The writer itself must not add bidi for an LTR target.
+
+    Checked on the writer's own output, before the typography pass --
+    that pass re-derives direction from the text it finds.
+    """
+
+    from app.output import docx as docx_module
+
+    path = docx_module.write_docx(
+        _segments(), tmp_path / "writer.docx", title="Book", to_lang="EN",
+    )
+    assert _bidi_paragraph_count(path) == 0
 
 
 def test_to_lang_reaches_markdown_writer(tmp_path):

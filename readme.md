@@ -750,18 +750,21 @@ python -m app.main --input PATH [options]
 | `srt` | Subtitles (books: translated text, estimated timing) |
 | `quality_report` | QA report (runs the quality scorer) |
 
-Persian outputs embed **Vazirmatn** fonts and handle RTL in DOCX and PDF
-(`rtl_docx.py`, `rtl_pdf.py`).
+Every PDF goes through one engine — Chromium, with **Vazirmatn** embedded
+(`html_pdf.py`) — and body pages carry footer numbers. DOCX gets the same
+face embedded, per-run RTL and a table-of-contents field (`rtl_docx.py`).
 
-For an EPUB source, `docx`, `translated_pdf` and `markdown` are rendered from
-the reassembled translated EPUB, so the book's illustrations are carried
-through. `mobile_pdf` and `bilingual_pdf` still use the text-only segment
-writer and do not include images.
+For an EPUB source, `docx`, `translated_pdf`, `mobile_pdf`, `bilingual_pdf`
+and `markdown` are rendered from the reassembled translated EPUB, so the
+book's illustrations are carried through. The bilingual PDF takes its
+source half from the segments and its pictures from the EPUB, chapter by
+chapter.
 
 For a PDF source, `translated_pdf` and `bilingual_pdf` copy each source page,
 remove only its text layer, and keep images and line art; the translation is
-written over the original text area. The `docx` and `markdown` extra outputs
-from a PDF remain text-only.
+rendered by Chromium at the exact size of the original text area and stamped
+over it, shrinking to fit rather than clipping. The `docx` and `markdown`
+extra outputs from a PDF remain text-only.
 
 > 📝 SRT carries the **translated** text. For `.srt` uploads the original
 > timecodes are preserved; for books the timing is estimated from the

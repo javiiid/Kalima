@@ -16,6 +16,7 @@ from pathlib import Path
 
 from app.output import docx, json_segments, markdown, pdf, txt
 from app.output.markers import strip_markers
+from app.output.rtl_docx import fix_docx_typography
 from app.output.segments import build_qa_report, build_segments
 from app.pipeline import quality_scorer
 
@@ -89,12 +90,17 @@ CONVERT_OUTPUTS = frozenset({
     "translated_pdf",
 })
 
-#: Outputs that can be rendered from an EPUB's own XHTML and media through
-#: pandoc. For an EPUB source these must be built from the reassembled EPUB,
-#: not from text-only segments, or every illustration is dropped.
+#: Outputs that must be built from the reassembled EPUB rather than from
+#: text-only segments, or every illustration is dropped. ``mobile_pdf`` is
+#: rendered from the EPUB's own HTML; ``bilingual_pdf`` needs both the
+#: source text (only the segments have it) and the pictures (only the EPUB
+#: has them), so it is rendered from segments with the EPUB's images
+#: injected per chapter -- see :func:`generate_epub_outputs`.
 EPUB_RENDERED_OUTPUTS = frozenset({
     "docx",
     "translated_pdf",
+    "mobile_pdf",
+    "bilingual_pdf",
     "markdown",
 })
 
@@ -352,6 +358,13 @@ def generate_outputs(
                     title=title,
                     to_lang=to_lang,
                 )
+                # The writer emits a clean package; direction, embedded
+                # Vazirmatn and the TOC field are added by the typography
+                # pass. EPUB-sourced DOCX already went through it (pandoc
+                # route), every other source used to skip it entirely --
+                # which is why a PDF-sourced DOCX had Persian text with no
+                # ``w:rtl`` and no embedded font.
+                fix_docx_typography(target)
 
             elif name == "translated_pdf":
 
@@ -446,6 +459,7 @@ def generate_epub_outputs(
     output_dir,
     base_name,
     to_lang="",
+    segments=None,
 ):
     """Render the formats that need an EPUB's markup and media.
 
@@ -454,17 +468,26 @@ def generate_epub_outputs(
     Markdown outputs are built from the reassembled EPUB with pandoc, which
     embeds ``word/media/`` parts, page images and base64 data URIs respectively.
 
+    ``bilingual_pdf`` is the exception: the reassembled EPUB holds only the
+    translation, so the source half of each pair can only come from
+    ``segments``. The pictures come from the EPUB through
+    :func:`app.output.epub_media.chapter_images` and are placed at the head of
+    their chapter. Without ``segments`` the format is reported as skipped
+    rather than written half-empty.
+
     Returns the same shape as :func:`generate_outputs` (without QA fields,
     which belong to the text segments).
     """
 
     from app.output.epub_convert import write_epub_output
+    from app.output.epub_media import chapter_images
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     generated = {}
     skipped = {}
+    images = None
 
     for name in normalize_outputs(requested):
         if name not in EPUB_RENDERED_OUTPUTS:
@@ -473,13 +496,30 @@ def generate_epub_outputs(
 
         target = output_dir / f"{base_name}{SUFFIXES[name]}"
         try:
-            write_epub_output(
-                Path(epub_path),
-                target,
-                name,
-                to_lang,
-                language=to_lang,
-            )
+            if name == "bilingual_pdf":
+                if not segments:
+                    skipped[name] = (
+                        "bilingual_pdf needs the source segments"
+                    )
+                    continue
+                if images is None:
+                    images = chapter_images(epub_path)
+                pdf.write_bilingual_pdf(
+                    segments,
+                    target,
+                    title=base_name,
+                    to_lang=to_lang,
+                    filetype="epub",
+                    images=images,
+                )
+            else:
+                write_epub_output(
+                    Path(epub_path),
+                    target,
+                    name,
+                    to_lang,
+                    language=to_lang,
+                )
         except Exception as exc:
             skipped[name] = f"{name} failed: {exc}"
             try:

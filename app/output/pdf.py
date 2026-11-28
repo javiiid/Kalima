@@ -22,6 +22,7 @@ from pathlib import Path
 import fitz
 
 from app.output.docx import RTL_LANGUAGES
+from app.output.epub_media import images_for
 from app.output.segments import chapter_title
 from app.output.typography import text_direction
 
@@ -362,6 +363,42 @@ def _run_story(
 
     return path
 
+#: Chromium body styles for the A4 outputs. Vazirmatn, real leading
+#: for Persian joining, and a page break between chapters (the
+#: sections below are what the break applies to).
+_BODY_CSS = """
+body { font-family: Vazirmatn, sans-serif; font-size: 11.5pt; line-height: 1.95; margin: 0; }
+h1 { font-size: 20pt; margin: 0 0 14pt; }
+p { margin: 0 0 0.8em; orphans: 2; widows: 2; }
+p.label { font-size: 8pt; color: #777777; margin-bottom: 0; letter-spacing: 0.04em; }
+hr { border: none; border-top: 0.5pt solid #cccccc; margin: 10pt 0; }
+figure { margin: 0 0 12pt; text-align: center; break-inside: avoid; }
+figure img { max-width: 100%; max-height: 62vh; }
+.chapter + .chapter { break-before: page; }
+"""
+
+# Larger type and looser leading: a 360pt line holds fewer words and
+# Persian joining needs the air.
+_MOBILE_CSS = """
+body { font-family: Vazirmatn, sans-serif; font-size: 13pt; line-height: 2.05; margin: 0; }
+h1 { font-size: 22pt; margin: 0 0 16pt; }
+p { margin: 0 0 0.9em; }
+p.label { font-size: 9pt; color: #777777; margin-bottom: 0; }
+hr { border: none; border-top: 0.5pt solid #cccccc; margin: 12pt 0; }
+figure { margin: 0 0 14pt; text-align: center; break-inside: avoid; }
+figure img { max-width: 100%; max-height: 60vh; }
+.chapter + .chapter { break-before: page; }
+"""
+
+#: Page geometry for the phone output. Points, like every other
+#: measurement in this module.
+MOBILE_PAGE_SIZE = f"{MOBILE_WIDTH}pt {MOBILE_HEIGHT}pt"
+MOBILE_PAGE_MARGIN = f"{MOBILE_MARGIN}pt"
+
+#: Public aliases: the EPUB renderer reuses the same type scale.
+BODY_CSS = _BODY_CSS
+MOBILE_CSS = _MOBILE_CSS
+
 
 def _title_html(title, rtl):
     if not str(title or "").strip():
@@ -385,12 +422,147 @@ def _para_html(text, direction, flagged=False, seg_id=None):
     )
 
 
+def _pair_html(segment, default_rtl):
+    """One bilingual pair: original, translation, rule."""
+
+    source = segment.get("source", "")
+    target = segment.get("target", "")
+    flagged = bool(segment.get("flagged"))
+    source_dir = _direction(source, "ltr")
+    target_dir = _direction(
+        target, "rtl" if default_rtl else "ltr"
+    )
+    highlight = (
+        ' style="background-color:#fff59d;"'
+        if flagged
+        else ""
+    )
+    return (
+        f'<p class="label" dir="{source_dir}">ORIGINAL</p>'
+        f'<p dir="{source_dir}">{_escaped(source)}</p>'
+        f'<p class="label" dir="{target_dir}">TRANSLATION</p>'
+        f'<p dir="{target_dir}"{highlight}>{_escaped(target)}</p>'
+        "<hr/>"
+    )
+
+
+def _figure_html(sources):
+    """Figures for a chapter, as ``<img>`` tags carrying data URIs.
+
+    ``sources`` are already data URIs (see
+    :func:`app.output.epub_media.chapter_images`). The text-only
+    segment model cannot carry a picture, so the caller that still
+    has the source EPUB supplies them; a caller without one passes
+    nothing and gets the old text-only output.
+    """
+
+    return "".join(
+        f'<figure><img src="{src}" alt=""/></figure>'
+        for src in sources or []
+    )
+
+
+def _sections(
+    items,
+    start,
+    breaks,
+    default_rtl,
+    images=None,
+    bilingual=False,
+    end=None,
+):
+    """Chapter sections, each one a page-break group.
+
+    ``break-before: page`` lives on ``.chapter + .chapter`` in the
+    stylesheet, so the first section never starts with a blank page
+    and a forced break inside a chapter stays impossible.
+    """
+
+    sections = []
+    current = []
+    seen = set()
+
+    for pos in range(start, len(items) if end is None else end):
+        if pos in breaks and current:
+            sections.append("".join(current))
+            current = []
+
+        segment = items[pos] or {}
+        chapter = str(segment.get("chapter") or "")
+
+        if chapter and chapter not in seen:
+            seen.add(chapter)
+            current.append(_figure_html(images_for(images, chapter)))
+
+        if bilingual:
+            current.append(_pair_html(segment, default_rtl))
+        else:
+            target = segment.get("target", "")
+            current.append(
+                _para_html(
+                    target,
+                    _direction(
+                        target, "rtl" if default_rtl else "ltr"
+                    ),
+                    flagged=bool(segment.get("flagged")),
+                )
+            )
+
+    if current:
+        sections.append("".join(current))
+
+    return [
+        f'<section class="chapter">{section}</section>'
+        for section in sections
+    ]
+
+
+def _story_html(parts):
+    """The same content as one MuPDF story (the fallback path)."""
+
+    # The parts are separate renders in the Chromium path, so the body
+    # starts on a fresh page; the fallback has to say that explicitly.
+    return _BREAK.join(body for body, _footer in parts)
+
+
+def _render(
+    parts,
+    path,
+    *,
+    title,
+    page_size="A4",
+    margin="18mm 17mm",
+    css="",
+    fallback,
+):
+    """Chromium first; MuPDF's story engine only if it is unusable."""
+
+    from app.output.html_pdf import render_parts
+
+    try:
+        return render_parts(
+            parts,
+            path,
+            title=title,
+            page_size=page_size,
+            margin=margin,
+            extra_css=css,
+        )
+    except Exception as exc:  # noqa: BLE001 -- fallback is the point
+        print(
+            f"Warning: Chromium PDF render failed ({exc}); "
+            "falling back to the MuPDF writer."
+        )
+        return fallback()
+
+
 def write_translated_pdf(
     segments,
     path,
     title="Translated book",
     to_lang="FA",
     filetype="epub",
+    images=None,
 ):
     """
     Write the TRANSLATED_PDF output as flowing text.
@@ -399,7 +571,13 @@ def write_translated_pdf(
     one is full, so a 300-chunk book is a book, not 300 single
     paragraphs each on their own page. Each EPUB chapter still
     starts on a fresh page. Body pages carry footer numbers from
-    1; front matter (title, contents) is unnumbered.
+    1; front matter (title, contents) is unnumbered -- the front
+    matter is a separate render, which is also what makes its
+    numbering start at 1 rather than at an offset.
+
+    ``images`` maps a chapter name to data URIs (see
+    :func:`app.output.epub_media.chapter_images`); they are placed
+    at the start of their chapter.
     """
 
     default_rtl = str(to_lang).upper() in RTL_LANGUAGES
@@ -407,24 +585,32 @@ def write_translated_pdf(
     items = list(segments or [])
     body_idx = _body_start_index(items)
     breaks = _chapter_breaks(items, filetype)
+    heading = _title_html(title, default_rtl)
 
-    parts = [_title_html(title, default_rtl)]
-
-    for pos, segment in enumerate(items):
-        if pos in breaks:
-            parts.append(_BREAK)
-        segment = segment or {}
-        target = segment.get("target", "")
-        parts.append(
-            _para_html(
-                target,
-                _direction(target, "rtl" if default_rtl else "ltr"),
-                flagged=bool(segment.get("flagged")),
-                seg_id="body-start" if pos == body_idx else None,
+    parts = []
+    if body_idx > 0:
+        front = heading + "".join(
+            _sections(
+                items, 0, set(), default_rtl, images, end=body_idx
             )
         )
+        parts.append((front, False))
+        body = "".join(
+            _sections(items, body_idx, breaks, default_rtl, images)
+        )
+    else:
+        body = heading + "".join(
+            _sections(items, 0, breaks, default_rtl, images)
+        )
+    parts.append((body, True))
 
-    return _run_story("".join(parts), path, title=title)
+    return _render(
+        parts,
+        path,
+        title=title,
+        css=_BODY_CSS,
+        fallback=lambda: _run_story(_story_html(parts), path, title=title),
+    )
 
 
 def write_mobile_pdf(
@@ -433,6 +619,7 @@ def write_mobile_pdf(
     title="Translated book",
     to_lang="FA",
     filetype="epub",
+    images=None,
 ):
     """
     Write the MOBILE_PDF output: translation only on a narrow
@@ -449,31 +636,41 @@ def write_mobile_pdf(
     items = list(segments or [])
     body_idx = _body_start_index(items)
     breaks = _chapter_breaks(items, filetype)
+    heading = _title_html(title, default_rtl)
 
-    parts = [_title_html(title, default_rtl)]
-
-    for pos, segment in enumerate(items):
-        if pos in breaks:
-            parts.append(_BREAK)
-        segment = segment or {}
-        target = segment.get("target", "")
-        parts.append(
-            _para_html(
-                target,
-                _direction(target, "rtl" if default_rtl else "ltr"),
-                flagged=bool(segment.get("flagged")),
-                seg_id="body-start" if pos == body_idx else None,
+    parts = []
+    if body_idx > 0:
+        front = heading + "".join(
+            _sections(
+                items, 0, set(), default_rtl, images, end=body_idx
             )
         )
+        parts.append((front, False))
+        body = "".join(
+            _sections(items, body_idx, breaks, default_rtl, images)
+        )
+    else:
+        body = heading + "".join(
+            _sections(items, 0, breaks, default_rtl, images)
+        )
+    parts.append((body, True))
 
-    return _run_story(
-        "".join(parts),
+    return _render(
+        parts,
         path,
         title=title,
-        page_width=MOBILE_WIDTH,
-        page_height=MOBILE_HEIGHT,
-        margin=MOBILE_MARGIN,
+        page_size=MOBILE_PAGE_SIZE,
+        margin=MOBILE_PAGE_MARGIN,
         css=_MOBILE_CSS,
+        fallback=lambda: _run_story(
+            _story_html(parts),
+            path,
+            title=title,
+            page_width=MOBILE_WIDTH,
+            page_height=MOBILE_HEIGHT,
+            margin=MOBILE_MARGIN,
+            css=_MOBILE_CSS,
+        ),
     )
 
 
@@ -483,6 +680,7 @@ def write_bilingual_pdf(
     title="Translated book",
     to_lang="FA",
     filetype="epub",
+    images=None,
 ):
     """
     Write the BILINGUAL_PDF output.
@@ -508,32 +706,36 @@ def write_bilingual_pdf(
     items = list(segments or [])
     body_idx = _body_start_index(items)
     breaks = _chapter_breaks(items, filetype)
+    heading = _title_html(title, default_rtl)
 
-    parts = [_title_html(title, default_rtl)]
+    parts = []
+    if body_idx > 0:
+        front = heading + "".join(
+            _sections(
+                items, 0, set(), default_rtl, images,
+                bilingual=True, end=body_idx,
+            )
+        )
+        parts.append((front, False))
+        body = "".join(
+            _sections(
+                items, body_idx, breaks, default_rtl, images,
+                bilingual=True,
+            )
+        )
+    else:
+        body = heading + "".join(
+            _sections(
+                items, 0, breaks, default_rtl, images, bilingual=True
+            )
+        )
+    parts.append((body, True))
 
-    for pos, segment in enumerate(items):
-        if pos in breaks:
-            parts.append(_BREAK)
-        segment = segment or {}
-        source = segment.get("source", "")
-        target = segment.get("target", "")
-        flagged = bool(segment.get("flagged"))
-        source_dir = _direction(source, "ltr")
-        target_dir = _direction(
-            target, "rtl" if default_rtl else "ltr"
-        )
-        highlight = (
-            ' style="background-color:#fff59d;"'
-            if flagged
-            else ""
-        )
-        anchor = ' id="body-start"' if pos == body_idx else ""
-        parts.append(
-            f'<p class="label"{anchor} dir="{source_dir}">ORIGINAL</p>'
-            f'<p dir="{source_dir}">{_escaped(source)}</p>'
-            f'<p class="label" dir="{target_dir}">TRANSLATION</p>'
-            f'<p dir="{target_dir}"{highlight}>{_escaped(target)}</p>'
-            "<hr/>"
-        )
+    return _render(
+        parts,
+        path,
+        title=title,
+        css=_BODY_CSS,
+        fallback=lambda: _run_story(_story_html(parts), path, title=title),
+    )
 
-    return _run_story("".join(parts), path, title=title)

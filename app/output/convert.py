@@ -22,7 +22,12 @@ import re
 from html import escape
 from pathlib import Path
 
-from app.output.formats import CONVERT_OUTPUTS, SUFFIXES, generate_outputs
+from app.output.formats import (
+    CONVERT_OUTPUTS,
+    EPUB_RENDERED_OUTPUTS,
+    SUFFIXES,
+    generate_outputs,
+)
 from app.output.typography import has_rtl, html_text
 
 # ------------------------------------------------------------------
@@ -263,7 +268,14 @@ def convert_file(
 
     base_name = Path(title).stem if title else input_path.stem
 
-    formatted = [name for name in normalized if suffix == "epub" and name in {"docx", "translated_pdf", "markdown"}]
+    # Every output that needs the EPUB's own markup and media. The list
+    # used to be spelled out here and drifted from the registry; it is
+    # the registry's set now, so a new EPUB-rendered format cannot be
+    # silently rendered from text-only segments (which drops pictures).
+    formatted = [
+        name for name in normalized
+        if suffix == "epub" and name in EPUB_RENDERED_OUTPUTS
+    ]
     persian_pdf = suffix != "epub" and "translated_pdf" in normalized and any(has_rtl(segment["source"]) for segment in segments)
     result = generate_outputs(
         segments,
@@ -278,9 +290,26 @@ def convert_file(
         from app.output.epub_convert import write_epub_output
 
         for name in formatted:
+            if name == "bilingual_pdf":
+                # Needs both halves of the pair; handled below.
+                continue
             target = output_dir / f"{base_name}{SUFFIXES[name]}"
             write_epub_output(input_path, target, name, lang)
             result["generated"][name] = str(target)
+        if "bilingual_pdf" in formatted:
+            from app.output import pdf as pdf_module
+            from app.output.epub_media import chapter_images
+
+            target = output_dir / f"{base_name}{SUFFIXES['bilingual_pdf']}"
+            pdf_module.write_bilingual_pdf(
+                segments,
+                target,
+                title=title or base_name,
+                to_lang=lang,
+                filetype="epub",
+                images=chapter_images(input_path),
+            )
+            result["generated"]["bilingual_pdf"] = str(target)
     if persian_pdf:
         from app.output.rtl_pdf import write_html_pdf
 

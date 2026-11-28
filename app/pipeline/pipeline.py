@@ -585,6 +585,20 @@ def _translate_epub(
             if name not in EPUB_RENDERED_OUTPUTS
         ]
 
+        # Built once: the text writers need the segments, and the
+        # EPUB-rendered bilingual PDF needs them too (the reassembled
+        # EPUB holds only the translation).
+        segments = (
+            build_segments(
+                all_chunks,
+                translations,
+                chapter_map,
+                filetype="epub",
+            )
+            if output_formats
+            else None
+        )
+
         if output_formats:
 
             print()
@@ -596,12 +610,7 @@ def _translate_epub(
             if text_outputs:
 
                 output_result = generate_outputs(
-                    build_segments(
-                        all_chunks,
-                        translations,
-                        chapter_map,
-                        filetype="epub",
-                    ),
+                    segments,
                     requested=text_outputs,
                     output_dir=output_path.parent,
                     base_name=output_path.stem,
@@ -703,6 +712,7 @@ def _translate_epub(
                 output_path.parent,
                 output_path.stem,
                 to_lang=to_lang,
+                segments=segments,
             )
 
             if manifest_outputs is None:

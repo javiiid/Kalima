@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 import pypandoc
 
 from app.output.rtl_docx import fix_docx_typography
-from app.output.rtl_pdf import write_html_pdf
+from app.output.html_pdf import render_html_pdf
 from app.output.structure import CLASS_EMPHASIS
 
 #: The tags the rewrite can introduce, and the ones it must not duplicate.
@@ -285,12 +285,25 @@ def _write_with(
     to_lang: str,
     language: str | None = None,
 ):
-    if output_format == "translated_pdf":
+    if output_format in {"translated_pdf", "mobile_pdf"}:
+        # One renderer for both: the EPUB's own XHTML and media, printed
+        # by Chromium with Vazirmatn embedded and body pages numbered.
+        # ``mobile_pdf`` differs only in page geometry and type scale.
+        from app.output.pdf import MOBILE_CSS, MOBILE_PAGE_MARGIN, MOBILE_PAGE_SIZE
+
         html = pypandoc.convert_file(
             str(normalised), "html5", format="epub",
             extra_args=["--standalone", "--embed-resources"], sandbox=True,
         )
-        return write_html_pdf(html, path)
+        if output_format == "mobile_pdf":
+            return render_html_pdf(
+                html,
+                path,
+                page_size=MOBILE_PAGE_SIZE,
+                margin=MOBILE_PAGE_MARGIN,
+                extra_css=MOBILE_CSS,
+            )
+        return render_html_pdf(html, path)
 
     if output_format == "markdown":
         with TemporaryDirectory(prefix="kalima-epub-media-") as temporary:

@@ -1,6 +1,8 @@
-﻿import base64
+import base64
 import html
 import shutil
+import tempfile
+import uuid
 from pathlib import Path
 import fitz  # PyMuPDF
 from openai import OpenAI
@@ -184,13 +186,92 @@ class PDFHandler:
         return area
 
     @staticmethod
-    def _insert_translated_page(doc, original_doc, page_index, html_content):
+    def _overlay_plan(original_doc, grouped):
+        """Work out where each page's translation goes, without writing yet.
+
+        Returns ``(plan, fragments)``: ``plan`` is one entry per output page
+        (``page_index`` or ``None`` for a text-only page, the HTML, the
+        source text rects and the area to fill), and ``fragments`` is the
+        same pages as ``(width, height, html)`` for the renderer.
+
+        Measuring against the *source* page rather than the copied one is
+        deliberate: ``insert_pdf`` preserves geometry, so the rects are the
+        same, and doing it up front means the whole book is rendered in one
+        Chromium pass instead of one launch per page.
+        """
+
+        plan = []
+        fragments = []
+        for page_index in sorted(
+            grouped,
+            key=lambda value: (value is None, value if value is not None else 0),
+        ):
+            items = sorted(
+                grouped[page_index],
+                key=lambda item: int(str(item[0]).split("-")[-1]),
+            )
+            html_content = "<br/>".join(content for _, content in items)
+            if page_index is not None and 0 <= page_index < len(original_doc):
+                source_page = original_doc[page_index]
+                rects = PDFHandler._text_block_rects(source_page)
+                area = PDFHandler._translation_rect(source_page, rects)
+                plan.append(
+                    (page_index, html_content, rects, area, len(fragments))
+                )
+                fragments.append((area.width, area.height, html_content))
+            else:
+                plan.append((page_index, html_content, [], None, None))
+        return plan, fragments
+
+    @staticmethod
+    def _render_overlay(fragments):
+        """Render the translations at their exact areas, in one pass.
+
+        Chromium is what makes the overlay text Vazirmatn *and* searchable:
+        MuPDF's own HTML insertion embeds the face but writes a broken
+        ``ToUnicode`` map, so ``ت`` copies as U+04A5. Returns ``(document,
+        path)`` or ``(None, None)`` when the renderer is unavailable, in
+        which case the caller falls back to MuPDF.
+        """
+
+        if not fragments:
+            return None, None
+        from app.output.html_pdf import render_fragments
+
+        target = (
+            Path(tempfile.gettempdir())
+            / f"kalima-overlay-{uuid.uuid4().hex}.pdf"
+        )
+        try:
+            render_fragments(fragments, target)
+            return fitz.open(str(target)), target
+        except Exception as exc:  # noqa: BLE001 -- fallback is the point
+            print(
+                f"Warning: Chromium overlay render failed ({exc}); "
+                "using the MuPDF HTML writer."
+            )
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None, None
+
+    @staticmethod
+    def _insert_translated_page(
+        doc,
+        original_doc,
+        page_index,
+        html_content,
+        rendered=None,
+        fragment_index=None,
+    ):
         """Copy one source page, remove its text only, and add the translation.
 
         ``apply_redactions`` is told to keep images and line art, so figures,
         charts and scanned illustrations survive while the original text is
         removed. The translation is then placed over the text area the source
-        page used.
+        page used -- stamped from the Chromium render when one was supplied,
+        otherwise drawn with MuPDF's HTML writer.
         """
         doc.insert_pdf(
             original_doc,
@@ -206,11 +287,17 @@ class PDFHandler:
                 images=fitz.PDF_REDACT_IMAGE_NONE,
                 graphics=fitz.PDF_REDACT_LINE_ART_NONE,
             )
-        PDFHandler.insert_htmlbox_safe(
-            page,
-            PDFHandler._translation_rect(page, rects),
-            html_content,
-        )
+        area = PDFHandler._translation_rect(page, rects)
+        if rendered is not None and fragment_index is not None:
+            try:
+                page.show_pdf_page(area, rendered, fragment_index)
+                return page
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"Warning: could not stamp the Chromium overlay on "
+                    f"page {page_index + 1} ({exc}); using the MuPDF writer."
+                )
+        PDFHandler.insert_htmlbox_safe(page, area, html_content)
         return page
 
     @staticmethod
@@ -253,43 +340,56 @@ class PDFHandler:
                         (chunk_id, html_content)
                     )
 
-                for page_index in sorted(
-                    grouped,
-                    key=lambda value: (value is None, value if value is not None else 0),
-                ):
-                    items = sorted(
-                        grouped[page_index],
-                        key=lambda item: int(str(item[0]).split('-')[-1]),
-                    )
-                    html_content = "<br/>".join(
-                        content for _, content in items
-                    )
-                    if page_index is not None and 0 <= page_index < len(original_doc):
-                        try:
-                            PDFHandler._insert_translated_page(
-                                doc,
-                                original_doc,
-                                page_index,
-                                html_content,
-                            )
-                            continue
-                        except Exception as exc:
-                            print(
-                                f"Warning: could not preserve images on "
-                                f"page {page_index + 1} ({exc}); "
-                                f"using a text-only page."
-                            )
-                    page = doc.new_page(width=page_width, height=page_height)
-                    PDFHandler.insert_htmlbox_safe(
-                        page,
-                        fitz.Rect(
-                            margin,
-                            margin,
-                            page_width - margin,
-                            page_height - margin,
-                        ),
+                plan, fragments = PDFHandler._overlay_plan(
+                    original_doc, grouped,
+                )
+                rendered, rendered_path = PDFHandler._render_overlay(fragments)
+                try:
+                    for (
+                        page_index,
                         html_content,
-                    )
+                        _rects,
+                        _area,
+                        fragment_index,
+                    ) in plan:
+                        if page_index is not None:
+                            try:
+                                PDFHandler._insert_translated_page(
+                                    doc,
+                                    original_doc,
+                                    page_index,
+                                    html_content,
+                                    rendered=rendered,
+                                    fragment_index=fragment_index,
+                                )
+                                continue
+                            except Exception as exc:
+                                print(
+                                    f"Warning: could not preserve images on "
+                                    f"page {page_index + 1} ({exc}); "
+                                    f"using a text-only page."
+                                )
+                        page = doc.new_page(
+                            width=page_width, height=page_height,
+                        )
+                        PDFHandler.insert_htmlbox_safe(
+                            page,
+                            fitz.Rect(
+                                margin,
+                                margin,
+                                page_width - margin,
+                                page_height - margin,
+                            ),
+                            html_content,
+                        )
+                finally:
+                    if rendered is not None:
+                        rendered.close()
+                    if rendered_path is not None:
+                        try:
+                            rendered_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
             else:
                 for chunk_id in sorted(
                     translations.keys(),
@@ -345,12 +445,8 @@ class PDFHandler:
         # Open the original PDF
         original_doc = fitz.open(original_pdf_path)
 
+        grouped = {}
         for page_num in range(len(original_doc)):
-            # Add original page
-            original_page = original_doc.load_page(page_num)
-            doc.insert_pdf(original_doc, from_page=page_num, to_page=page_num)
-
-            # Add translated page
             if chapter_map:
                 items = [
                     (chunk_id, content)
@@ -366,16 +462,38 @@ class PDFHandler:
                     )
                 )
             else:
-                chunk_id = f'chunk-{page_num}'
-                html_content = translations.get(chunk_id, "")
-
+                html_content = translations.get(f'chunk-{page_num}', "")
             if html_content:
+                grouped[page_num] = [(f"chunk-{page_num}", html_content)]
+
+        plan, fragments = PDFHandler._overlay_plan(original_doc, grouped)
+        # ``plan`` is ordered by page, so the entries line up with the loop
+        # below; a page with no translation simply has no entry.
+        by_page = {
+            page_index: (html_content, fragment_index)
+            for page_index, html_content, _rects, _area, fragment_index
+            in plan
+            if page_index is not None
+        }
+        rendered, rendered_path = PDFHandler._render_overlay(fragments)
+        try:
+            for page_num in range(len(original_doc)):
+                # Add original page
+                doc.insert_pdf(original_doc, from_page=page_num, to_page=page_num)
+
+                # Add translated page
+                entry = by_page.get(page_num)
+                if not entry:
+                    continue
+                html_content, fragment_index = entry
                 try:
                     PDFHandler._insert_translated_page(
                         doc,
                         original_doc,
                         page_num,
                         html_content,
+                        rendered=rendered,
+                        fragment_index=fragment_index,
                     )
                 except Exception as exc:
                     print(
@@ -397,6 +515,14 @@ class PDFHandler:
                         ),
                         html_content,
                     )
+        finally:
+            if rendered is not None:
+                rendered.close()
+            if rendered_path is not None:
+                try:
+                    rendered_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         # Save the uncompressed PDF to a temporary file
         doc.save(temp_pdf_path)

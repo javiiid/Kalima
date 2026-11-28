@@ -126,8 +126,18 @@ def test_pdf_embeds_persian_fonts_without_missing_text(persian_epub, tmp_path):
         assert ENGLISH_PARAGRAPH in text.replace("\n", " ")
         assert "\ufffd" not in text
         assert document.page_count >= 2
-        spans = [span for page in document for block in page.get_text("dict")["blocks"] if "lines" in block for line in block["lines"] for span in line["spans"]]
-        assert all(span["size"] >= 10 for span in spans if span["text"].strip())
+        # Body text only: the page-number footer lives in the bottom
+        # margin and is deliberately smaller than the body.
+        spans = [
+            span
+            for page in document
+            for block in page.get_text("dict")["blocks"] if "lines" in block
+            for line in block["lines"] for span in line["spans"]
+            if span["text"].strip()
+            and span["bbox"][3] < page.rect.height - 45
+        ]
+        assert spans
+        assert all(span["size"] >= 10 for span in spans)
 
 
 def test_text_conversion_keeps_persian_joining_characters(tmp_path):

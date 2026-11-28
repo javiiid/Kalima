@@ -346,6 +346,75 @@ def _declared_size(parts) -> int | None:
     return None
 
 
+#: The field a Word table of contents is: a ``TOC`` instruction between
+#: ``fldChar`` begin/separate/end runs, with cached placeholder text so the
+#: document is readable before anyone presses F9. ``\o "1-3"`` collects
+#: headings 1-3 (the writer emits ``Heading1``..``Heading6`` styles and the
+#: pandoc route emits its own heading styles, both of which carry
+#: ``w:outlineLvl``), ``\h`` makes the entries hyperlinks, ``\z`` hides tab
+#: leaders in web view and ``\u`` uses the outline levels as-is.
+_TOC_INSTRUCTION = ' TOC \\o "1-3" \\h \\z \\u '
+
+_TOC_TITLE = (
+    '<w:p xmlns:w="{w}"><w:pPr><w:jc w:val="center"/>'
+    '<w:spacing w:before="0" w:after="240"/></w:pPr>'
+    '<w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>'
+    "<w:t>Table of Contents</w:t></w:r></w:p>"
+)
+
+_TOC_FIELD = (
+    '<w:p xmlns:w="{w}">'
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    '<w:r><w:instrText xml:space="preserve">' + _TOC_INSTRUCTION + "</w:instrText></w:r>"
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    "<w:r><w:t>Right-click here and choose Update Field to build the "
+    "table of contents.</w:t></w:r>"
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+)
+
+_TOC_PAGE_BREAK = (
+    '<w:p xmlns:w="{w}"><w:r><w:br w:type="page"/></w:r></w:p>'
+)
+
+
+def insert_toc_field(document) -> bool:
+    """Put a table-of-contents field at the top of the document body.
+
+    Without it a reader has headings and no way to see them: Word's
+    navigation pane is not the document, and every other reader shows
+    nothing. The field updates on open (``w:updateFields`` in
+    ``settings.xml``) and on demand everywhere else.
+
+    Skips a document that already carries one, so the pass is safe to
+    run twice.
+    """
+
+    body = document.find(tag("body"))
+    if body is None:
+        return False
+    for element in document.iter(tag("instrText")):
+        if "TOC" in (element.text or ""):
+            return False
+    elements = [
+        ET.fromstring(template.format(w=W))
+        for template in (_TOC_TITLE, _TOC_FIELD, _TOC_PAGE_BREAK)
+    ]
+    for offset, element in enumerate(elements):
+        body.insert(offset, element)
+    return True
+
+
+def enable_field_update(parts) -> None:
+    """Ask Word to refresh fields (the TOC) when the document opens."""
+
+    settings = ET.fromstring(parts["word/settings.xml"])
+    if settings.find(tag("updateFields")) is None:
+        # CT_Settings is a sequence and ``updateFields`` sits near its end,
+        # after ``defaultTabStop`` -- appending is the valid position here.
+        ET.SubElement(settings, tag("updateFields"), {tag("val"): "true"})
+    parts["word/settings.xml"] = xml_bytes(settings)
+
+
 def fix_docx_typography(path):
     with zipfile.ZipFile(path) as archive:
         parts = {name: archive.read(name) for name in archive.namelist()}
@@ -374,6 +443,9 @@ def fix_docx_typography(path):
         for properties in styles_ltr.iter(tag("rPr")):
             font_properties(properties, bidi_language)
         parts["word/styles.xml"] = xml_bytes(styles_ltr)
+        if insert_toc_field(document):
+            parts["word/document.xml"] = xml_bytes(document)
+        enable_field_update(parts)
         embed_fonts(parts)
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, data in parts.items():
@@ -416,10 +488,12 @@ def fix_docx_typography(path):
     value(paragraph_defaults, "jc", "right" if default_direction == "rtl" else "left")
     for properties in styles.iter(tag("rPr")):
         font_properties(properties, bidi_language)
+    insert_toc_field(document)
     parts["word/document.xml"] = xml_bytes(document)
     parts["word/styles.xml"] = xml_bytes(styles)
     if numbering is not None:
         parts["word/numbering.xml"] = xml_bytes(numbering)
+    enable_field_update(parts)
     embed_fonts(parts)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in parts.items():

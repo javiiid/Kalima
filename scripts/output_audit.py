@@ -210,7 +210,7 @@ def run_epub_job(source: Path, out_dir: Path) -> list[tuple[str, str, Path]]:
     )
     text_result = generate_outputs(
         segments,
-        ["json_segments", "txt_bilingual", "mobile_pdf", "bilingual_pdf", "srt"],
+        ["json_segments", "txt_bilingual", "srt"],
         output_dir=out_dir,
         base_name="epub-book",
         filetype="epub",
@@ -219,10 +219,11 @@ def run_epub_job(source: Path, out_dir: Path) -> list[tuple[str, str, Path]]:
     )
     epub_result = generate_epub_outputs(
         translated,
-        ["docx", "translated_pdf", "markdown"],
+        ["docx", "translated_pdf", "mobile_pdf", "bilingual_pdf", "markdown"],
         out_dir,
         "epub-book",
         to_lang="FA",
+        segments=segments,
     )
     produced = [("epub", "translated_epub", translated)]
     for result in (text_result, epub_result):
@@ -498,7 +499,13 @@ def findings(entries: list[dict]) -> list[str]:
                     f"{metrics['presentation_forms']} presentation-form characters"
                 )
             if metrics.get("numbered_pages", 0) == 0:
-                notes.append(f"{name}: no page numbers detected")
+                # A source-PDF overlay keeps the original page, so the
+                # numbering is whatever the source had -- nothing to add.
+                if not (
+                    entry["source"] in {"pdf", "scanned"}
+                    and entry["format"] == "translated_pdf"
+                ):
+                    notes.append(f"{name}: no page numbers detected")
             if entry["source"] == "epub" and entry["format"] in {
                 "mobile_pdf", "bilingual_pdf",
             } and metrics.get("images", 0) == 0:

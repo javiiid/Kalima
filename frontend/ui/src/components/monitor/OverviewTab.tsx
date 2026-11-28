@@ -126,6 +126,16 @@ export function OverviewTab({ job }: { job: Job }) {
                 {t('monitor.ov.download')}
               </a>
             ) : null}
+            {job.preview ? (
+              <a
+                className="btn btn-secondary"
+                href={job.preview}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t('monitor.assets.preview')}
+              </a>
+            ) : null}
             {job.reader ? (
               <Link className="btn btn-secondary" to={job.reader}>
                 {t('monitor.ov.openReader')}
@@ -143,9 +153,9 @@ export function OverviewTab({ job }: { job: Job }) {
             </p>
             <ul className="grid gap-2">
               {assetRows.map(([name, url]) => (
-                <li key={name}>
+                <li key={name} className="flex items-center gap-2">
                   <a
-                    className="surface-card flex min-w-0 items-center justify-between gap-3 p-3"
+                    className="surface-card flex min-w-0 flex-1 items-center justify-between gap-3 p-3"
                     href={url}
                   >
                     <strong
@@ -158,6 +168,16 @@ export function OverviewTab({ job }: { job: Job }) {
                       {t('monitor.ov.downloadAsset')}
                     </span>
                   </a>
+                  {job.asset_previews?.[name] ? (
+                    <a
+                      className="btn btn-ghost shrink-0"
+                      href={job.asset_previews[name]}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {t('monitor.assets.preview')}
+                    </a>
+                  ) : null}
                 </li>
               ))}
             </ul>

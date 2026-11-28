@@ -66,6 +66,9 @@ export interface Job {
   style: string
   download?: string
   asset_downloads?: Record<string, string>
+  /** The same files, served inline by the app instead of downloaded. */
+  preview?: string
+  asset_previews?: Record<string, string>
   reader?: string
 }
 
@@ -222,6 +225,12 @@ export interface LibraryVariant {
   error: string | null
   download: string
   reader: string
+  /**
+   * Every produced file for this variant: `main` plus one entry per extra
+   * output (`translated_pdf`, `docx`, ...). Absent when the job is no longer
+   * in memory, which is why the library treats it as optional.
+   */
+  versions?: { name: string; download: string }[]
   /** Model that produced this translated variant; `''` for original files. */
   model: string
   /** Provider cost so far for this variant's job, rounded server-side. */
@@ -962,7 +971,9 @@ export const api = {
     request<{ ok: true }>(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   readerChapters: (id: string) =>
-    request<{ book: string; items: Chapter[] }>(`/api/reader/${encodeURIComponent(id)}/chapters`),
+    request<{ book: string; title?: string; author?: string; items: Chapter[] }>(
+      `/api/reader/${encodeURIComponent(id)}/chapters`,
+    ),
   readerChapter: (id: string, chapterId: number) =>
     request<ChapterContent>(`/api/reader/${encodeURIComponent(id)}/chapters/${chapterId}`),
   readerBlocks: (id: string, chapterId: number) =>

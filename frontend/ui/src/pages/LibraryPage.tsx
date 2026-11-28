@@ -285,6 +285,11 @@ function BookMenu({ book }: { book: LibraryBook }) {
 
   const canDelete = active?.status !== 'running' && active?.status !== 'queued'
 
+  // A PDF is the one extra output a browser can show on its own: the reader
+  // covers the EPUB, and a DOCX has no inline renderer. So the menu offers a
+  // preview only when the job actually produced a PDF.
+  const previewable = active?.versions?.find((version) => /pdf/i.test(version.name))
+
   const runDelete = () => {
     if (
       !window.confirm(
@@ -412,6 +417,18 @@ function BookMenu({ book }: { book: LibraryBook }) {
                   <NavIcon name="monitor" size={16} />
                   {t('nav.jobs')}
                 </Link>
+              ) : null}
+              {previewable ? (
+                <a
+                  href={previewable.download.replace('/downloads/', '/preview/')}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  role="menuitem"
+                  onClick={close}
+                >
+                  <NavIcon name="convert" size={16} />
+                  {t('library.preview')}
+                </a>
               ) : null}
               {active?.download ? (
                 <a href={active.download} role="menuitem" onClick={close}>

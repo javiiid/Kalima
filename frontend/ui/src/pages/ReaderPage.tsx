@@ -50,7 +50,7 @@ import {
   toggleBookmark,
   type ReaderMode,
 } from '@/lib/reading.ts'
-import { fa } from '@/lib/format'
+import { assetLabel, fa } from '@/lib/format'
 import { useLanguage } from '@/i18n/useLanguage.ts'
 import type { StringKey } from '@/i18n/fa.ts'
 import './reader.css'
@@ -319,6 +319,17 @@ export function ReaderPage() {
     queryKey: ['reader-chapters', id],
     queryFn: () => api.readerChapters(id),
     enabled: Boolean(id),
+  })
+
+  // The reader is the one page a finished book is read on, so the download
+  // menu belongs here: the EPUB the reader is showing plus every extra file
+  // the job produced (PDF, DOCX, bilingual...). Fetched separately from the
+  // chapters so a slow job lookup never delays the first chapter.
+  const job = useQuery({
+    queryKey: ['job', id],
+    queryFn: () => api.job(id),
+    enabled: Boolean(id),
+    staleTime: 60_000,
   })
 
   // Read chapters per book (not per chapter): opening a new chapter marks
@@ -613,6 +624,14 @@ export function ReaderPage() {
   )
 
   const items = chapterItems
+  // Every file the job produced, minus the main one when the hero download
+  // already serves it -- the same rule the monitor's overview uses, so the two
+  // pages never list the same bytes twice under two labels.
+  const book = job.data
+  const extraDownloads = Object.entries(book?.asset_downloads ?? {}).filter(
+    ([name]) => !(book?.download && name === 'main'),
+  )
+  const hasDownloads = Boolean(book?.download) || extraDownloads.length > 0
   // A book the server cannot serve (missing translation, or one that is not
   // ours) fails on the chapter list, which disables the chapter query -- so
   // without this branch the body would sit on a skeleton forever. The server
@@ -625,10 +644,47 @@ export function ReaderPage() {
     // scope sits on the wrapper so only this page's subtree is restyled.
     <main className="page" dir={dir}>
       <div className={`reader-theme-${theme}`}>
-        <header className="mb-5">
-          <h1 className="text-[length:var(--text-h1)] font-extrabold tracking-tight">
-            {chapters.data?.book ?? t('reader.read')}
-          </h1>
+        <header className="mb-5 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-[length:var(--text-h1)] font-extrabold tracking-tight">
+              {chapters.data?.title ?? chapters.data?.book ?? t('reader.read')}
+            </h1>
+            {chapters.data?.author ? (
+              <p
+                className="mt-1 text-[length:var(--text-small)]"
+                style={{ color: 'var(--color-text-secondary)' }}
+              >
+                {chapters.data.author}
+              </p>
+            ) : null}
+          </div>
+          {hasDownloads ? (
+            <details className="reader-download">
+              <summary className="btn btn-secondary">{t('reader.downloads')}</summary>
+              <ul className="reader-download-list">
+                {book?.download ? (
+                  <li>
+                    <a href={book.download}>{t('reader.downloadMain')}</a>
+                  </li>
+                ) : null}
+                {extraDownloads.map(([name, url]) => (
+                  <li key={name} className="reader-download-row">
+                    <a href={url}>{assetLabel(name)}</a>
+                    {book?.asset_previews?.[name] ? (
+                      <a
+                        className="reader-download-preview"
+                        href={book.asset_previews[name]}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {t('monitor.assets.preview')}
+                      </a>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </header>
 
         <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">

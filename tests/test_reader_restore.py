@@ -148,6 +148,55 @@ def test_restored_job_returns_to_its_db_owner(live):
     assert status == 404
 
 
+def _make_epub_with_meta(path, title: str, author: str) -> None:
+    """An EPUB that carries its own Dublin Core title and creator."""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        archive.writestr(
+            "META-INF/container.xml",
+            '<container><rootfile full-path="OEBPS/content.opf"/></container>',
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            '<package xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            f"<metadata><dc:title>{title}</dc:title><dc:creator>{author}</dc:creator></metadata>"
+            '<manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>'
+            '</manifest><spine><itemref idref="c1"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/c1.xhtml",
+            "<html><head><title>Chapter One</title></head>"
+            "<body><h1>Chapter One</h1><p>text</p></body></html>",
+        )
+
+
+def test_chapters_payload_carries_the_books_own_title_and_author(live):
+    """The reader header shows the book, not the uploaded filename.
+
+    ``/api/reader/<id>/chapters`` used to return only ``book`` (the filename
+    the user uploaded). The header now prefers the source EPUB's Dublin Core
+    title and creator, and falls back to the filename when the source has
+    been pruned or carries no metadata.
+    """
+    database, server = live
+    owner, owner_token = _user(database, "owner@example.com")
+    source = web.UPLOAD_DIR / "upload_1234.epub"
+    output = web.WEB_OUTPUT_DIR / "out.translated.epub"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _make_epub_with_meta(source, "Sample Book", "Some Author")
+    _make_epub(output, "Chapter One")
+    _legacy_snapshot(web.JOB_META_DIR, "meta-1", source, output)
+    _seed_job_row(database, owner, "meta-1", source, output)
+    web.restore_jobs()
+
+    status, payload = _call(server, "GET", "/api/reader/meta-1/chapters", token=owner_token)
+    assert status == 200
+    assert payload["title"] == "Sample Book"
+    assert payload["author"] == "Some Author"
+    assert payload["book"].endswith(".epub")
+
+
 def test_restored_owner_falls_back_only_without_any_evidence(live):
     database, _ = live
     owner, _ = _user(database, "owner@example.com")

@@ -1241,6 +1241,67 @@
     font-size: var(--text-caption);
     color: var(--color-text-muted);
   }
+  .asset-preview {
+    justify-self: start;
+    margin-top: var(--spacing-1);
+    padding: 4px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-primary);
+    font: inherit;
+    font-size: var(--text-caption);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .asset-preview:hover {
+    border-color: var(--color-primary);
+  }
+
+  /* ------------------------------------------------------------------
+     Output preview
+     The job page's "look at it before you keep it" overlay. A PDF is
+     handed to the browser's own viewer; a DOCX arrives as a text page.
+     ------------------------------------------------------------------ */
+  .preview-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    padding: var(--spacing-4);
+    background: rgb(0 0 0 / 0.62);
+  }
+  .preview-panel {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 60rem;
+    height: 100%;
+    margin: 0 auto;
+    overflow: hidden;
+    border-radius: var(--radius-card, 14px);
+    background: var(--color-surface);
+    box-shadow: 0 24px 60px rgb(0 0 0 / 0.35);
+  }
+  .preview-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-2);
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--spacing-3) var(--spacing-4);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .preview-actions {
+    display: flex;
+    gap: var(--spacing-2);
+  }
+  .preview-frame {
+    flex: 1 1 auto;
+    width: 100%;
+    border: 0;
+    background: #ffffff;
+  }
 
   /* ------------------------------------------------------------------
      Navigation

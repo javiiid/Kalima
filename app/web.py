@@ -62,6 +62,7 @@ from app.core.web_i18n import inject_language_switcher
 from app.pipeline.pipeline import translate
 from app.jobs.scheduler import JobScheduler
 from app.output.convert import convert_file, normalize_convert_formats
+from app.output.book_meta import book_meta
 from app.translation.prompts import get_default_prompt, with_author_voice
 from app.storage.database import db
 from app.reader.service import chapter_blocks as reader_chapter_blocks, chapters as reader_chapters, chapter as reader_chapter, read_asset as reader_read_asset, clean_bookmarks as reader_clean_bookmarks, job_glossary_terms as reader_glossary_terms
@@ -210,6 +211,27 @@ def spa_enabled() -> bool:
     if flag in {"1", "true", "yes", "on"}:
         return True
     return spa_dist_dir() is not None
+
+
+#: What a preview may be served as, by suffix. Anything not listed is
+#: refused rather than handed out as ``application/octet-stream`` with
+#: ``inline``, which is how a preview becomes a drive-by download with a
+#: guessed type. ``text/html`` here means "this module renders it": a
+#: DOCX and a Markdown file do not open in a tab on their own.
+PREVIEW_TYPES = {
+    ".pdf": "application/pdf",
+    ".json": "application/json; charset=utf-8",
+    ".docx": "text/html; charset=utf-8",
+    ".md": "text/html; charset=utf-8",
+    ".txt": "text/html; charset=utf-8",
+    ".srt": "text/html; charset=utf-8",
+}
+
+#: A preview is somebody else's document rendered on our origin. It may
+#: not run script, fetch anything remote, or navigate the app.
+PREVIEW_CSP = (
+    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+)
 
 
 _ACCESS_LOGGER: "StructuredLogger | None | bool" = None
@@ -1180,6 +1202,11 @@ def _job_payload(job: Job) -> dict:
     if job.status == "completed" and job.output_path:
         result["download"] = f"/downloads/{job.id}"
         result["asset_downloads"] = {name: f"/downloads/{job.id}/{name}" for name in (job.assets or {})}
+        # The preview of the same files, served inline by the app instead of
+        # downloaded. A client that renders `asset_downloads` gets a download
+        # button; one that renders these gets a "look at it first" button.
+        result["preview"] = f"/preview/{job.id}"
+        result["asset_previews"] = {name: f"/preview/{job.id}/{name}" for name in (job.assets or {})}
         if job.filetype == "epub":
             result["reader"] = f"/reader/{job.id}"
     return result
@@ -1758,7 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
         rel = unquote(path).lstrip("/")
         if not rel:
             rel = "index.html"
-        elif rel.split("/", 1)[0] in {"api", "covers", "downloads"}:
+        elif rel.split("/", 1)[0] in {"api", "covers", "downloads", "preview"}:
             return False
         # Sourcemaps expose the original TypeScript; never serve them. The
         # bundle ships them for local debugging only (frontend/docs/audit_bundle.py
@@ -1926,6 +1953,43 @@ class Handler(BaseHTTPRequestHandler):
             with path.open("rb") as stream: shutil.copyfileobj(stream, self.wfile)
         except _CLIENT_GONE:
             pass
+    def _send_bytes(self, payload: bytes, content_type: str, extra: dict[str, str] | None = None) -> None:
+        """Write an in-memory body with the same disconnect tolerance as a file."""
+        try:
+            self.send_response(200); self.send_header("Content-Type", content_type)
+            for name, value in (extra or {}).items(): self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload))); self.end_headers()
+            self.wfile.write(payload)
+        except _CLIENT_GONE:
+            pass
+    def _send_preview(self, path: Path, name: str) -> None:
+        """Serve one output inline: a PDF in the viewer, a DOCX as text.
+
+        The ownership check is the caller's (it is the same one
+        ``/downloads/`` uses); this only decides how to hand the bytes
+        over. ``nosniff`` plus a sandboxed CSP matter here more than on
+        a download: the document is rendered on the app's own origin.
+        """
+        content_type = PREVIEW_TYPES.get(path.suffix.lower())
+        if content_type is None:
+            self.send_error(404); return
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": PREVIEW_CSP,
+            "Cache-Control": "private, no-store",
+        }
+        if content_type.startswith("text/html"):
+            from app.output.preview import docx_preview, text_preview
+
+            title = Path(name).stem or path.stem
+            page = (
+                docx_preview(path, title)
+                if path.suffix.lower() == ".docx"
+                else text_preview(path, title)
+            )
+            self._send_bytes(page.encode("utf-8"), content_type, headers)
+            return
+        self._send_file(path, content_type, f'inline; filename="{path.name}"', headers)
     def _session_token(self) -> str:
         """Read the session cookie. A missing or unparsable cookie is no session."""
         try:
@@ -1973,6 +2037,30 @@ class Handler(BaseHTTPRequestHandler):
         if job is not None and int(job.user_id) != self._user_id():
             return None
         return job
+    def _convert_output(self, convert_id: str, format_name: str) -> Path | None:
+        """The file a quick conversion produced, if this user owns it.
+
+        Shared by ``/downloads/convert/`` and ``/preview/convert/`` so the
+        two can never disagree about who may read what.
+        """
+        entry = CONVERTS.get(convert_id)
+        if entry and int(entry.get("user_id", 1)) != self._user_id():
+            entry = None
+        file_path = (entry or {}).get("generated", {}).get(format_name) if entry else None
+        if not file_path:
+            cand_dir = user_output_dir(self._user_id()) / f"convert_{convert_id}"
+            if cand_dir.is_dir():
+                from app.output.formats import SUFFIXES as _SUFFIXES
+                if format_name not in _SUFFIXES:
+                    return None
+                for cand in cand_dir.glob(f"*{_SUFFIXES.get(format_name, '')}"):
+                    if cand.is_file():
+                        file_path = str(cand)
+                        break
+        candidate = Path(file_path) if file_path else None
+        if not candidate or not candidate.is_file() or user_output_dir(self._user_id()) not in candidate.parents:
+            return None
+        return candidate
     def _resumable_job_for_book(self, book_id: int) -> Job | None:
         """The live job a bulk resume would continue, or ``None``.
 
@@ -2060,7 +2148,18 @@ class Handler(BaseHTTPRequestHandler):
             job = self._job(parsed.path.split("/")[3])
             if not job or job.filetype != "epub" or not job.output_path or not job.output_path.is_file():
                 self._json({"error": "Translated EPUB is not available yet."}, 404); return
-            try: self._json({"book": job.filename, "items": reader_chapters(job.output_path)})
+            try:
+                # The header shows the book's own title and author, not the
+                # uploaded filename. ``book_meta`` reads the source EPUB and
+                # falls back to the filename stem when the file is gone or has
+                # no metadata, so this never blanks the header.
+                meta = book_meta(job.input_path, title=Path(job.filename).stem)
+                self._json({
+                    "book": job.filename,
+                    "title": meta.title or job.filename,
+                    "author": meta.author,
+                    "items": reader_chapters(job.output_path),
+                })
             except (OSError, ValueError, zipfile.BadZipFile) as exc: self._json({"error": str(exc)}, 422)
             return
         if parsed.path.startswith("/reader/") and "/asset/" in parsed.path:
@@ -2379,30 +2478,40 @@ class Handler(BaseHTTPRequestHandler):
             mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
             self._send_file(cover_file, mime, extra={"Cache-Control": "private, max-age=86400"})
             return
+        if parsed.path.startswith("/preview/"):
+            if parsed.path.startswith("/preview/convert/"):
+                rest = parsed.path[len("/preview/convert/"):]
+                if "/" not in rest:
+                    self.send_error(404); return
+                convert_id, format_name = rest.split("/", 1)
+                converted = self._convert_output(convert_id, format_name)
+                if converted is None:
+                    self.send_error(404); return
+                self._send_preview(converted, converted.name)
+                return
+            if parsed.path.count("/") == 3:
+                job_id, asset_name = parsed.path[len("/preview/"):].split("/", 1)
+                job = self._job(job_id)
+                asset_path = (job.assets or {}).get(asset_name) if job else None
+                asset_file = Path(asset_path) if asset_path else None
+                if not asset_file or not asset_file.is_file() or user_output_dir(job.user_id) not in asset_file.parents:
+                    self.send_error(404); return
+                self._send_preview(asset_file, asset_name)
+                return
+            job = self._job(parsed.path.rsplit("/", 1)[-1])
+            if not job or not job.output_path or not job.output_path.is_file():
+                self.send_error(404); return
+            self._send_preview(job.output_path, job.output_path.name)
+            return
         if parsed.path.startswith("/downloads/"):
             if parsed.path.startswith("/downloads/convert/"):
                 rest = parsed.path[len("/downloads/convert/"):]
                 if "/" in rest:
                     convert_id, format_name = rest.split("/", 1)
-                    entry = CONVERTS.get(convert_id)
-                    if entry and int(entry.get("user_id", 1)) != self._user_id():
-                        entry = None
-                    file_path = (entry or {}).get("generated", {}).get(format_name) if entry else None
-                    if not file_path:
-                        cand_dir = user_output_dir(self._user_id()) / f"convert_{convert_id}"
-                        if cand_dir.is_dir():
-                            from app.output.formats import SUFFIXES as _SUFFIXES
-                            if format_name not in _SUFFIXES:
-                                self.send_error(404); return
-                            suffix = _SUFFIXES.get(format_name, "")
-                            for cand in cand_dir.glob(f"*{suffix}"):
-                                if cand.is_file():
-                                    file_path = str(cand)
-                                    break
-                    p2 = Path(file_path) if file_path else None
-                    if not p2 or not p2.is_file() or user_output_dir(self._user_id()) not in p2.parents:
+                    converted = self._convert_output(convert_id, format_name)
+                    if converted is None:
                         self.send_error(404); return
-                    self._send_file(p2, "application/octet-stream", f'attachment; filename="{p2.name}"')
+                    self._send_file(converted, "application/octet-stream", f'attachment; filename="{converted.name}"')
                     return
             if parsed.path.startswith("/downloads/rescue/"):
                 job = self._job(parsed.path.rsplit("/", 1)[-1])

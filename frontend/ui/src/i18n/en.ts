@@ -747,6 +747,8 @@ export const en: Record<StringKey, string> = {
   'monitor.progress.preparing': 'Preparing the book…',
   'monitor.ov.progress': 'Progress',
   'monitor.ov.percent': 'Percent',
+  'monitor.ov.status': 'Status',
+  'monitor.ov.duration': 'Translation time',
   'monitor.ov.health': 'Health',
   'monitor.ov.speed': 'Speed',
   'monitor.ov.perMinute': '{rate} chunks/min',

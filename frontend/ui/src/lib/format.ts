@@ -303,6 +303,26 @@ export const faBytes = (bytes: number | null | undefined): string => {
   return `${Math.round(bytes / 1024)} KB`
 }
 
+/**
+ * Wall-clock seconds between two ISO timestamps, or 0 when either is missing or
+ * unparseable.
+ *
+ * A finished job has no live rate to show -- the backend recomputes
+ * `chunks_per_minute` from `now - started_at`, so the number only decays after
+ * the last chunk is written. What stays true is how long the work actually
+ * took, and on a finished job `updated_at` is the moment it finished.
+ */
+export const elapsedSeconds = (
+  start: string | null | undefined,
+  end: string | null | undefined,
+): number => {
+  if (!start || !end) return 0
+  const from = Date.parse(start)
+  const to = Date.parse(end)
+  if (Number.isNaN(from) || Number.isNaN(to)) return 0
+  return Math.max(0, Math.round((to - from) / 1000))
+}
+
 export const faDuration = (seconds: number | null | undefined): string => {
   if (!seconds) return '—'
   const minutes = Math.ceil(seconds / 60)

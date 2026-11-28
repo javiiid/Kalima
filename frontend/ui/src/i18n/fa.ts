@@ -762,6 +762,8 @@ export const fa = {
   'monitor.progress.preparing': 'در حال آماده‌سازی کتاب…',
   'monitor.ov.progress': 'پیشرفت',
   'monitor.ov.percent': 'درصد',
+  'monitor.ov.status': 'وضعیت',
+  'monitor.ov.duration': 'مدت ترجمه',
   'monitor.ov.health': 'سلامت',
   'monitor.ov.speed': 'سرعت',
   'monitor.ov.perMinute': '{rate} بخش/دقیقه',

@@ -2,6 +2,7 @@ import type { Job } from '@/lib/api'
 import { Link } from 'react-router-dom'
 import {
   assetLabel,
+  elapsedSeconds,
   fa,
   faBytes,
   faDate,
@@ -9,6 +10,7 @@ import {
   healthLabel,
   modeLabel,
   serverError,
+  statusLabel,
   styleLabel,
 } from '@/lib/format'
 import { useLanguage } from '@/i18n/useLanguage.ts'
@@ -34,6 +36,18 @@ export function OverviewTab({ job }: { job: Job }) {
   const percent = Math.max(0, Math.min(100, progress.percent))
   const healthColor =
     job.health === 'red' ? 'var(--color-error)' : job.health === 'yellow' ? 'var(--color-warning)' : 'var(--color-success)'
+  // Live metrics only mean something while work is in flight. On a finished
+  // job the backend keeps recomputing the rate from `now - started_at`, so the
+  // speed figure only falls and the ETA is always zero: two numbers that look
+  // like data and are not. The finished layout swaps them for the status and
+  // the time the translation actually took.
+  const finished = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+  const statusColor =
+    job.status === 'completed'
+      ? 'var(--color-success)'
+      : job.status === 'failed'
+        ? 'var(--color-error)'
+        : 'var(--color-text-muted)'
   const assetEntries = Object.entries(job.asset_downloads ?? {})
   // The hero button already serves the main file; listing its 'main' asset
   // again would offer the same bytes twice under two URLs. With no hero
@@ -76,22 +90,36 @@ export function OverviewTab({ job }: { job: Job }) {
         >
           <div
             className="progress-fill"
-            style={{ width: `${percent}%`, background: 'var(--color-primary)' }}
+            style={{
+              width: `${percent}%`,
+              background: job.status === 'completed' ? 'var(--color-success)' : 'var(--color-primary)',
+            }}
           />
         </div>
-        <div className="mt-[var(--spacing-4)] grid grid-cols-2 gap-[var(--spacing-3)] sm:grid-cols-4">
-          <Field label={t('monitor.ov.percent')} value={`${fa(percent)}${lang === 'en' ? '%' : '٪'}`} />
-          <Field
-            label={t('monitor.ov.health')}
-            value={healthLabel(job.health)}
-            tone={healthColor}
-          />
-          <Field
-            label={t('monitor.ov.speed')}
-            value={job.chunks_per_minute ? t('monitor.ov.perMinute', { rate: fa(job.chunks_per_minute) }) : t('monitor.ov.computing')}
-          />
-          <Field label={t('monitor.ov.eta')} value={faDuration(job.eta_seconds)} />
-        </div>
+        {finished ? (
+          <div className="mt-[var(--spacing-4)] grid grid-cols-2 gap-[var(--spacing-3)] sm:grid-cols-3">
+            <Field label={t('monitor.ov.status')} value={statusLabel(job.status)} tone={statusColor} />
+            <Field label={t('monitor.ov.health')} value={healthLabel(job.health)} tone={healthColor} />
+            <Field
+              label={t('monitor.ov.duration')}
+              value={faDuration(elapsedSeconds(job.started_at, job.updated_at))}
+            />
+          </div>
+        ) : (
+          <div className="mt-[var(--spacing-4)] grid grid-cols-2 gap-[var(--spacing-3)] sm:grid-cols-4">
+            <Field label={t('monitor.ov.percent')} value={`${fa(percent)}${lang === 'en' ? '%' : '٪'}`} />
+            <Field
+              label={t('monitor.ov.health')}
+              value={healthLabel(job.health)}
+              tone={healthColor}
+            />
+            <Field
+              label={t('monitor.ov.speed')}
+              value={job.chunks_per_minute ? t('monitor.ov.perMinute', { rate: fa(job.chunks_per_minute) }) : t('monitor.ov.computing')}
+            />
+            <Field label={t('monitor.ov.eta')} value={faDuration(job.eta_seconds)} />
+          </div>
+        )}
       </section>
 
       <section className="surface-card p-[var(--spacing-5)]" aria-labelledby="ov-details">

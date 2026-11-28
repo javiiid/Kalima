@@ -21,7 +21,7 @@ import { describe, it } from 'node:test'
 // `ERR_UNKNOWN_FILE_EXTENSION` before a single assertion ran, because
 // `node --test` strips types but does not transform JSX. `Ltr` is written with
 // `createElement` instead so this stays a plain module.
-import { Ltr, badgeClass, fa, faAgo, faDate, ltr, maskSecretLike, serverError, statusLabel, usd } from '../src/lib/format.ts'
+import { Ltr, badgeClass, elapsedSeconds, fa, faAgo, faDate, ltr, maskSecretLike, serverError, statusLabel, usd } from '../src/lib/format.ts'
 import { setLocale } from '../src/lib/locale.ts'
 
 describe('ltr', () => {
@@ -202,6 +202,29 @@ describe('fa', () => {
 
   it('handles a negative', () => {
     assert.ok(fa(-5).includes('۵'))
+  })
+})
+
+describe('elapsedSeconds', () => {
+  it('measures the wall clock between two timestamps', () => {
+    assert.equal(
+      elapsedSeconds('2026-09-22T19:57:29.000Z', '2026-09-22T20:07:29.000Z'),
+      600,
+    )
+  })
+
+  it('reports zero rather than NaN when a timestamp is missing', () => {
+    // A finished job that never recorded a start still has to render a cell.
+    assert.equal(elapsedSeconds(null, '2026-09-22T20:07:29.000Z'), 0)
+    assert.equal(elapsedSeconds('2026-09-22T19:57:29.000Z', undefined), 0)
+    assert.equal(elapsedSeconds('nonsense', '2026-09-22T20:07:29.000Z'), 0)
+  })
+
+  it('never returns a negative duration', () => {
+    assert.equal(
+      elapsedSeconds('2026-09-22T20:07:29.000Z', '2026-09-22T19:57:29.000Z'),
+      0,
+    )
   })
 })
 

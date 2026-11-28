@@ -36,6 +36,11 @@ const EXPECTED_FILES = [
 // rather than broken.
 const LANDING_FONT = 'Geist-Variable.woff2'
 
+// The English UI's Latin face, declared by `src/styles/fonts-latin.css` and
+// provisioned by `../docs/build_latin_font.py`. Checked for the same reason as
+// Geist: without it `html[lang='en']` silently falls back to Vazirmatn's Latin.
+const LATIN_FONT = 'Manrope-Variable.woff2'
+
 const problems = []
 
 if (!existsSync(GENERATED)) {
@@ -54,13 +59,17 @@ if (!existsSync(FONT_DIR)) {
       `missing ${join(FONT_DIR, LANDING_FONT)} (landing display face)`,
     )
   }
+  if (!present.has(LATIN_FONT)) {
+    problems.push(`missing ${join(FONT_DIR, LATIN_FONT)} (English UI face)`)
+  }
   // A partial set would render some weights synthesised, which looks like a
   // font bug rather than a missing file.
   const extra = [...present].filter(
     (name) =>
       name.endsWith('.woff2') &&
       !EXPECTED_FILES.includes(name) &&
-      name !== LANDING_FONT,
+      name !== LANDING_FONT &&
+      name !== LATIN_FONT,
   )
   if (extra.length > 0) {
     console.warn(`  note: ${extra.length} unexpected woff2 file(s) in public/fonts`)
@@ -69,7 +78,7 @@ if (!existsSync(FONT_DIR)) {
 
 if (problems.length > 0) {
   console.error('')
-  console.error('  The local Vazirmatn font has not been generated.')
+  console.error('  The local fonts have not been generated.')
   console.error('')
   for (const problem of problems) console.error(`    - ${problem}`)
   console.error('')
@@ -78,6 +87,7 @@ if (problems.length > 0) {
   console.error('')
   console.error('    python ..\\docs\\build_fonts.py')
   console.error('    python ..\\docs\\build_landing_font.py')
+  console.error('    python ..\\docs\\build_latin_font.py')
   console.error('')
   console.error('  It reads the woff2 files from')
   console.error('  D:\\J_BookTranslate_V\\app\\library so the font is never tracked')
@@ -86,4 +96,4 @@ if (problems.length > 0) {
   process.exit(1)
 }
 
-console.log('  fonts: generated CSS and 5 weights present')
+console.log('  fonts: generated CSS, 5 Vazirmatn weights, Geist and Manrope present')

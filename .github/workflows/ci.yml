@@ -36,6 +36,19 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/ui/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # `src/styles/fonts.generated.css` and `public/fonts/` are gitignored
+      # build artifacts, so a fresh checkout has neither and `vite build`
+      # fails on an unresolved import. Vazirmatn is copied from the tracked
+      # `app/library/*.woff2`; Geist and Manrope are not tracked at all and are
+      # fetched from jsdelivr (only when no local copy exists).
+      - name: Generate fonts
+        run: |
+          python ../docs/build_fonts.py
+          python ../docs/build_landing_font.py
+          python ../docs/build_latin_font.py
       - run: npm ci
       - run: npm run verify
 
